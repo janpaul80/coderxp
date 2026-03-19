@@ -2,12 +2,23 @@ import { Router, Request, Response } from 'express'
 import bcrypt from 'bcryptjs'
 import jwt from 'jsonwebtoken'
 import crypto from 'crypto'
-import { PrismaClient, Prisma } from '@prisma/client'
+import { Prisma } from '@prisma/client'
 import { z } from 'zod'
+import rateLimit from 'express-rate-limit'
 import { requireAuth, AuthRequest } from '../middleware/auth'
+import { prisma } from '../lib/prisma'
 
 const router: Router = Router()
-const prisma = new PrismaClient()
+
+// ─── Rate limiter: 10 requests per minute per IP (register + login) ──
+
+const authLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: process.env.NODE_ENV === 'production' ? 10 : 100,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many auth requests, please try again in a minute' },
+})
 
 const JWT_SECRET = process.env.JWT_SECRET ?? 'codedxp-dev-secret'
 const JWT_EXPIRES_IN = '7d'
@@ -29,7 +40,7 @@ const loginSchema = z.object({
 
 // ─── Register ─────────────────────────────────────────────────
 
-router.post('/register', async (req: Request, res: Response): Promise<void> => {
+router.post('/register', authLimiter, async (req: Request, res: Response): Promise<void> => {
   try {
     const body = registerSchema.parse(req.body)
 
@@ -50,7 +61,7 @@ router.post('/register', async (req: Request, res: Response): Promise<void> => {
       select: { id: true, name: true, email: true, createdAt: true },
     })
 
-    const token = jwt.sign({ userId: user.id, email: user.email }, JWT_SECRET, {
+    const token = jwt.sign({ userId: user.id, email: user.email, jti: crypto.randomUUID() }, JWT_SECRET, {
       expiresIn: JWT_EXPIRES_IN,
     })
 
@@ -97,7 +108,7 @@ async function createSessionWithRetry(userId: string, baseToken: string): Promis
   throw new Error('Failed to create unique session token after retries')
 }
 
-router.post('/login', async (req: Request, res: Response): Promise<void> => {
+router.post('/login', authLimiter, async (req: Request, res: Response): Promise<void> => {
   try {
     const body = loginSchema.parse(req.body)
 
@@ -113,7 +124,7 @@ router.post('/login', async (req: Request, res: Response): Promise<void> => {
       return
     }
 
-    const baseToken = jwt.sign({ userId: user.id, email: user.email }, JWT_SECRET, {
+    const baseToken = jwt.sign({ userId: user.id, email: user.email, jti: crypto.randomUUID() }, JWT_SECRET, {
       expiresIn: JWT_EXPIRES_IN,
     })
 

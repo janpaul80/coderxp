@@ -1,0 +1,30 @@
+{
+  "name": "codedxp",
+  "version": "1.0.0",
+  "private": true,
+  "description": "CodedXP — AI-powered autonomous app builder",
+  "scripts": {
+    "dev": "concurrently \"pnpm --filter web dev\" \"pnpm --filter server dev\"",
+    "dev:web": "pnpm --filter web dev",
+    "dev:server": "pnpm --filter server dev",
+    "build": "pnpm --filter web build && pnpm --filter server build",
+    "db:migrate": "pnpm --filter server prisma:migrate",
+    "db:generate": "pnpm --filter server prisma:generate",
+    "db:studio": "pnpm --filter server prisma:studio"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "form-data": "^4.0.5",
+    "node-fetch": "^3.3.2",
+    "socket.io-client": "^4.8.3"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@prisma/client",
+      "@prisma/engines",
+      "esbuild",
+      "msgpackr-extract",
+      "prisma"
+    ]
+  }
+}

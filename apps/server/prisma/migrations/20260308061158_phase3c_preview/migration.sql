@@ -1,0 +1,15 @@
+-- AlterEnum
+-- This migration adds more than one value to an enum.
+-- With PostgreSQL versions 11 and earlier, this is not possible
+-- in a single migration. This can be worked around by creating
+-- multiple migrations, each migration adding only one value to
+-- the enum.
+
+
+ALTER TYPE "JobStatus" ADD VALUE 'installing_deps';
+ALTER TYPE "JobStatus" ADD VALUE 'starting_preview';
+
+-- AlterTable
+ALTER TABLE "jobs" ADD COLUMN     "previewPid" INTEGER,
+ADD COLUMN     "previewPort" INTEGER,
+ADD COLUMN     "previewStatus" TEXT;

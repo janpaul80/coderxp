@@ -1,0 +1,63 @@
+[Env] rootDir: C:\Users\hartm\codexp\codedxp
+[Env] cwd: C:\Users\hartm\codexp\codedxp\apps\server
+[Env] loaded from: C:\Users\hartm\codexp\codedxp\.env.local
+[Env] OPEN_ROUTER_API_KEY: ***SET***
+[Env] LANGDOCK_API_KEY: ***SET***
+[Env] BLACKBOX_KEYS: ***SET*** (5 keys)
+[Env] BLACKBOX_ENDPOINT: https://api.blackbox.ai/v1/chat/completions
+[Env] BLACKBOX_MODEL: blackboxai/arcee-ai/trinity-large-preview:free
+[Env] PLANNER_PROVIDER: blackbox
+[Env] OPENCLAW_BASE_URL: http://87.106.111.220:8080
+[Env] DISABLE_LANGDOCK: false
+[Env] WORKER_PRIMARY_URL: not set (local-only mode)
+[Env] WORKER_PRIMARY_NAME: primary
+[Env] WORKER_FAILOVER_URL: not set
+[Env] WORKER_FAILOVER_NAME: failover
+[Env] WORKER_INTERNAL_SECRET: NOT SET (internal relay disabled)
+[Env] DIFY_MOCK_MODE: true
+[Env] DIFY_API_KEY: NOT SET
+[Env] DIFY_BASE_URL: not set (defaults to https://api.dify.ai/v1)
+[Env] DIFY_WORKFLOW_LANDING_PAGE: not set
+[Env] DIFY_WORKFLOW_SAAS: not set
+[Env] DIFY_WORKFLOW_STRIPE_AUTH_SUPABASE: not set
+[Builder] Queue initialized successfully
+[Builder] Worker initialized successfully
+
+🚀 CodedXP Server running on http://localhost:3001
+   Socket.io ready
+   Environment: development
+
+[WorkerRouter] No remote workers configured — running in local-only mode
+[PreviewManager] Lifecycle manager started (auto-kill after 2h, check every 5min)
+[0mGET /health [32m200[0m 29.039 ms - 54[0m
+prisma:query SELECT "public"."users"."id", "public"."users"."email", "public"."users"."name", "public"."users"."password", "public"."users"."createdAt", "public"."users"."updatedAt" FROM "public"."users" WHERE ("public"."users"."email" = $1 AND 1=1) LIMIT $2 OFFSET $3
+prisma:query INSERT INTO "public"."users" ("id","email","name","password","createdAt","updatedAt") VALUES ($1,$2,$3,$4,$5,$6) RETURNING "public"."users"."id", "public"."users"."name", "public"."users"."email", "public"."users"."createdAt"
+prisma:query INSERT INTO "public"."sessions" ("id","userId","token","expiresAt","createdAt") VALUES ($1,$2,$3,$4,$5) RETURNING "public"."sessions"."id", "public"."sessions"."userId", "public"."sessions"."token", "public"."sessions"."expiresAt", "public"."sessions"."createdAt"
+[0mPOST /api/auth/register [32m201[0m 2234.759 ms - 468[0m
+prisma:query SELECT "public"."sessions"."id", "public"."sessions"."userId", "public"."sessions"."token", "public"."sessions"."expiresAt", "public"."sessions"."createdAt" FROM "public"."sessions" WHERE ("public"."sessions"."token" = $1 AND 1=1) LIMIT $2 OFFSET $3
+prisma:query SELECT "public"."users"."id", "public"."users"."email", "public"."users"."name" FROM "public"."users" WHERE "public"."users"."id" IN ($1) OFFSET $2
+[0mPOST /api/projects [32m201[0m 160.894 ms - 219[0m
+[0mPOST /api/projects/cmmt8ly2000046zpu2ha5ovlm/chats [33m404[0m 1.652 ms - 21[0m
+[0mPOST /api/planner/classify [33m404[0m 1.999 ms - 21[0m
+[0mPOST /api/planner/classify [33m404[0m 1.240 ms - 21[0m
+[0mPOST /api/planner/classify [33m404[0m 0.890 ms - 21[0m
+[0mPOST /api/planner/classify [33m404[0m 1.047 ms - 21[0m
+[0mPOST /api/planner/classify [33m404[0m 1.468 ms - 21[0m
+[0mPOST /api/planner/classify [33m404[0m 1.754 ms - 21[0m
+prisma:query SELECT "public"."sessions"."id", "public"."sessions"."userId", "public"."sessions"."token", "public"."sessions"."expiresAt", "public"."sessions"."createdAt" FROM "public"."sessions" WHERE ("public"."sessions"."token" = $1 AND 1=1) LIMIT $2 OFFSET $3
+prisma:query SELECT "public"."users"."id", "public"."users"."email", "public"."users"."name" FROM "public"."users" WHERE "public"."users"."id" IN ($1) OFFSET $2
+prisma:query SELECT "public"."jobs"."id", "public"."jobs"."projectId", "public"."jobs"."planId", "public"."jobs"."status"::text, "public"."jobs"."currentStep", "public"."jobs"."progress", "public"."jobs"."logs", "public"."jobs"."error", "public"."jobs"."errorDetails", "public"."jobs"."previewUrl", "public"."jobs"."previewPort", "public"."jobs"."previewPid", "public"."jobs"."previewStatus", "public"."jobs"."workspacePath", "public"."jobs"."fileCount", "public"."jobs"."totalBytes", "public"."jobs"."failureCategory", "public"."jobs"."retryCount", "public"."jobs"."repairAttemptCount", "public"."jobs"."generatedFileCount", "public"."jobs"."generatedTotalBytes", "public"."jobs"."generatedKeyFiles", "public"."jobs"."scaffoldValidation", "public"."jobs"."commandSummary", "public"."jobs"."buildMeta", "public"."jobs"."workerName", "public"."jobs"."workerSelectedReason", "public"."jobs"."startedAt", "public"."jobs"."completedAt", "public"."jobs"."createdAt", "public"."jobs"."updatedAt" FROM "public"."jobs" LEFT JOIN "public"."projects" AS "j1" ON ("j1"."id") = ("public"."jobs"."projectId") WHERE (("j1"."userId" = $1 AND ("j1"."id" IS NOT NULL)) AND "public"."jobs"."status" NOT IN (CAST($2::text AS "public"."JobStatus"),CAST($3::text AS "public"."JobStatus"))) ORDER BY "public"."jobs"."createdAt" DESC LIMIT $4 OFFSET $5
+[0mGET /api/jobs/active [32m200[0m 83.849 ms - 12[0m
+prisma:query SELECT "public"."sessions"."id", "public"."sessions"."userId", "public"."sessions"."token", "public"."sessions"."expiresAt", "public"."sessions"."createdAt" FROM "public"."sessions" WHERE ("public"."sessions"."token" = $1 AND 1=1) LIMIT $2 OFFSET $3
+prisma:query SELECT "public"."users"."id", "public"."users"."email", "public"."users"."name" FROM "public"."users" WHERE "public"."users"."id" IN ($1) OFFSET $2
+prisma:query SELECT "public"."jobs"."id", "public"."jobs"."projectId", "public"."jobs"."planId", "public"."jobs"."status"::text, "public"."jobs"."currentStep", "public"."jobs"."progress", "public"."jobs"."logs", "public"."jobs"."error", "public"."jobs"."errorDetails", "public"."jobs"."previewUrl", "public"."jobs"."previewPort", "public"."jobs"."previewPid", "public"."jobs"."previewStatus", "public"."jobs"."workspacePath", "public"."jobs"."fileCount", "public"."jobs"."totalBytes", "public"."jobs"."failureCategory", "public"."jobs"."retryCount", "public"."jobs"."repairAttemptCount", "public"."jobs"."generatedFileCount", "public"."jobs"."generatedTotalBytes", "public"."jobs"."generatedKeyFiles", "public"."jobs"."scaffoldValidation", "public"."jobs"."commandSummary", "public"."jobs"."buildMeta", "public"."jobs"."workerName", "public"."jobs"."workerSelectedReason", "public"."jobs"."startedAt", "public"."jobs"."completedAt", "public"."jobs"."createdAt", "public"."jobs"."updatedAt" FROM "public"."jobs" LEFT JOIN "public"."projects" AS "j1" ON ("j1"."id") = ("public"."jobs"."projectId") WHERE (("j1"."userId" = $1 AND ("j1"."id" IS NOT NULL)) AND "public"."jobs"."status" = CAST($2::text AS "public"."JobStatus") AND "public"."jobs"."previewUrl" IS NOT NULL) ORDER BY "public"."jobs"."completedAt" DESC LIMIT $3 OFFSET $4
+[0mGET /api/jobs/active/completed [32m200[0m 68.044 ms - 12[0m
+prisma:query SELECT "public"."sessions"."id", "public"."sessions"."userId", "public"."sessions"."token", "public"."sessions"."expiresAt", "public"."sessions"."createdAt" FROM "public"."sessions" WHERE ("public"."sessions"."token" = $1 AND 1=1) LIMIT $2 OFFSET $3
+prisma:query SELECT "public"."users"."id", "public"."users"."email", "public"."users"."name" FROM "public"."users" WHERE "public"."users"."id" IN ($1) OFFSET $2
+prisma:query SELECT "public"."jobs"."id", "public"."jobs"."workspacePath", "public"."jobs"."status"::text FROM "public"."jobs" LEFT JOIN "public"."projects" AS "j1" ON ("j1"."id") = ("public"."jobs"."projectId") WHERE ("public"."jobs"."id" = $1 AND ("j1"."userId" = $2 AND ("j1"."id" IS NOT NULL))) LIMIT $3 OFFSET $4
+[0mGET /api/workspaces/fake-job-id-test/files [33m404[0m 12.958 ms - 25[0m
+prisma:query SELECT "public"."sessions"."id", "public"."sessions"."userId", "public"."sessions"."token", "public"."sessions"."expiresAt", "public"."sessions"."createdAt" FROM "public"."sessions" WHERE ("public"."sessions"."token" = $1 AND 1=1) LIMIT $2 OFFSET $3
+prisma:query SELECT "public"."users"."id", "public"."users"."email", "public"."users"."name" FROM "public"."users" WHERE "public"."users"."id" IN ($1) OFFSET $2
+[0mPOST /api/planner/generate [33m400[0m 18.527 ms - 258[0m
+[0mPOST /api/planner/converse [33m404[0m 1.056 ms - 21[0m
+[0mPOST /api/planner/repair [33m404[0m 0.780 ms - 21[0m

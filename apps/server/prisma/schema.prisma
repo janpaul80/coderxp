@@ -1,0 +1,523 @@
+// CodedXP — Prisma Schema
+// Covers: Users, Projects, Chats, Messages, Plans, Jobs, Files
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── User ─────────────────────────────────────────────────────
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String
+  password  String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  projects           Project[]
+  sessions           Session[]
+  subscription       Subscription?
+  userMemory         UserMemory?
+  projectMemories    ProjectMemory[]
+  credentialRequests CredentialRequest[]
+  browserSessions    BrowserSession[]
+  builderSessions    BuilderSession[]
+
+  @@map("users")
+}
+
+// ─── Session ──────────────────────────────────────────────────
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  token     String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("sessions")
+}
+
+// ─── Project ──────────────────────────────────────────────────
+
+model Project {
+  id          String        @id @default(cuid())
+  userId      String
+  name        String
+  description String?
+  status      ProjectStatus @default(draft)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  chats           Chat[]
+  jobs            Job[]
+  files           File[]
+  projectMemory   ProjectMemory?
+  builderSessions BuilderSession[]
+
+  @@map("projects")
+}
+
+enum ProjectStatus {
+  draft
+  planning
+  building
+  ready
+  error
+}
+
+// ─── Chat ─────────────────────────────────────────────────────
+
+model Chat {
+  id        String   @id @default(cuid())
+  projectId String
+  title     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  project  Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  messages Message[]
+  plans    Plan[]
+
+  @@map("chats")
+}
+
+// ─── Message ──────────────────────────────────────────────────
+
+model Message {
+  id        String      @id @default(cuid())
+  chatId    String
+  role      MessageRole
+  type      MessageType @default(text)
+  content   String      @db.Text
+  metadata  Json?
+  createdAt DateTime    @default(now())
+
+  chat Chat @relation(fields: [chatId], references: [id], onDelete: Cascade)
+
+  @@map("messages")
+}
+
+enum MessageRole {
+  user
+  assistant
+  system
+}
+
+enum MessageType {
+  text
+  plan
+  approval_response
+  build_complete
+  error
+  repair_start
+  repair_complete
+  credential_request
+  system_status
+}
+
+// ─── Plan ─────────────────────────────────────────────────────
+
+model Plan {
+  id                  String        @id @default(cuid())
+  chatId              String
+  projectId           String?
+  status              PlanStatus    @default(pending_approval)
+  summary             String        @db.Text
+  features            Json          // string[]
+  techStack           Json          // TechStack object
+  frontendScope       Json          // string[]
+  backendScope        Json          // string[]
+  integrations        Json          // string[]
+  executionSteps      Json          // ExecutionStep[]
+  estimatedComplexity Complexity    @default(medium)
+  approvedAt          DateTime?
+  rejectedAt          DateTime?
+  modifiedAt          DateTime?
+  modificationNote    String?       @db.Text
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+
+  chat Chat @relation(fields: [chatId], references: [id], onDelete: Cascade)
+  jobs Job[]
+
+  @@map("plans")
+}
+
+enum PlanStatus {
+  pending_approval
+  approved
+  rejected
+  modified
+  building
+  complete
+}
+
+enum Complexity {
+  low
+  medium
+  high
+}
+
+// ─── Job ─────────────────────────────────────────────────────
+
+model Job {
+  id           String    @id @default(cuid())
+  projectId    String
+  planId       String?
+  status       JobStatus @default(queued)
+  currentStep  String?
+  progress     Int       @default(0)
+  logs         Json      @default("[]") // JobLog[]
+  error        String?   @db.Text
+  errorDetails String?   @db.Text
+  previewUrl     String?
+  previewPort    Int?      // Port the Vite preview server is running on (Phase 3C+)
+  previewPid     Int?      // PID of the Vite preview process (Phase 3C+)
+  previewStatus  String?   // 'installing' | 'starting' | 'ready' | 'stopped' | 'failed'
+  workspacePath  String?   // Absolute path to generated workspace on disk (Phase 3B+)
+  fileCount      Int?      // Number of generated files
+  totalBytes     Int?      // Total bytes of generated files
+  failureCategory String?  // Stable failure category for postmortems
+  retryCount      Int      @default(0) // Retry attempts executed by queue worker
+  repairAttemptCount Int   @default(0) // Autonomous self-repair attempts (separate from BullMQ retries)
+  generatedFileCount Int?  // Structured generated file count (phase 4 hardening)
+  generatedTotalBytes Int? // Structured generated total bytes (phase 4 hardening)
+  generatedKeyFiles  Json? // Key generated files summary (phase 4 hardening)
+  scaffoldValidation Json? // Scaffold sanity validation details
+  commandSummary     Json? // Command execution summary (install/start/health)
+  buildMeta          Json? // Extensible structured build metadata
+  workerName           String?   // 'local' | 'server-220' | 'secondary' | etc.
+  workerSelectedReason String?   // 'primary_healthy' | 'failover_primary_unhealthy' | 'local_no_remote_configured' | 'local_all_remote_unhealthy'
+  startedAt      DateTime?
+  completedAt    DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  project            Project             @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  plan               Plan?               @relation(fields: [planId], references: [id])
+  credentialRequests CredentialRequest[]
+
+  @@map("jobs")
+}
+
+enum JobStatus {
+  queued
+  initializing
+  installing
+  generating_frontend
+  generating_backend
+  wiring_auth
+  wiring_integrations
+  running
+  testing
+  installing_deps
+  starting_preview
+  repairing
+  complete
+  failed
+}
+
+// ─── Credential Request ───────────────────────────────────────
+// Metadata-only record — values are NEVER persisted.
+// In-memory resolver map in credentialService.ts holds the live Promise.
+
+model CredentialRequest {
+  id          String                  @id @default(cuid())
+  jobId       String
+  userId      String
+  integration String
+  label       String
+  purpose     String                  @db.Text
+  fields      Json                    // CredentialField[]
+  status      CredentialRequestStatus @default(pending)
+  providedAt  DateTime?
+  skippedAt   DateTime?
+  expiresAt   DateTime
+  createdAt   DateTime                @default(now())
+
+  job  Job  @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("credential_requests")
+}
+
+enum CredentialRequestStatus {
+  pending
+  provided
+  skipped
+  expired
+  cancelled
+}
+
+// ─── Project Memory ───────────────────────────────────────────
+// Persistent cross-session memory scoped to a project.
+// Structured fields are the primary source of truth.
+
+model ProjectMemory {
+  id        String @id @default(cuid())
+  projectId String @unique
+  userId    String
+
+  // ── Structured fields (primary source of truth) ──────────
+  // Confirmed tech stack from approved plans / successful builds
+  preferredStack    Json?   // StackPreference: { frontend, backend, database, auth, deployment }
+  // Inferred auth provider: 'jwt' | 'supabase' | 'clerk' | 'nextauth' | 'none'
+  authProvider      String?
+  // Third-party integrations used: ['Stripe', 'Supabase', ...]
+  integrations      Json    @default("[]")
+  // Accepted project direction (from last approved plan summary, max 500 chars)
+  approvedDirection String? @db.Text
+  // Last build outcome
+  lastBuildStatus   String? // 'complete' | 'failed'
+  lastBuildMeta     Json?   // LastBuildMeta: { completedAt, fileCount, totalBytes, previewPort, workerName }
+  // Failure history — last 10 failures with fix status
+  failureHistory    Json    @default("[]") // FailureRecord[]
+  // Key decisions — last 20 decisions (plan approvals, stack confirmations, etc.)
+  decisions         Json    @default("[]") // DecisionRecord[]
+
+  // ── Supplemental summary (AI-distilled or rule-based) ────
+  summary   String? @db.Text
+
+  version   Int      @default(1)
+  updatedAt DateTime @updatedAt
+  createdAt DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("project_memories")
+}
+
+// ─── User Memory ──────────────────────────────────────────────
+// Persistent cross-session memory scoped to a user.
+// Captures preferences and history across all projects.
+
+model UserMemory {
+  id     String @id @default(cuid())
+  userId String @unique
+
+  // ── Structured fields (primary source of truth) ──────────
+  // Preferred tech stack inferred from successful builds
+  preferredStack    Json? // StackPreference: { frontend, backend, database, auth }
+  // All integrations this user has used across projects
+  knownIntegrations Json  @default("[]") // string[]
+  // Summary of past projects — last 20 entries
+  projectHistory    Json  @default("[]") // ProjectHistoryEntry[]
+
+  // ── Supplemental summary (AI-distilled or rule-based) ────
+  summary   String? @db.Text
+
+  version   Int      @default(1)
+  updatedAt DateTime @updatedAt
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_memories")
+}
+
+// ─── Browser Session ──────────────────────────────────────────
+// Permission-based browser control sessions.
+// Screenshots stored as files on disk — only paths persisted in DB.
+// Values for sensitive actions are ALWAYS redacted before persistence.
+
+model BrowserSession {
+  id             String               @id @default(cuid())
+  userId         String
+  jobId          String?              // Optional: linked to a build job
+  domain         String               // e.g. 'dashboard.stripe.com'
+  purpose        String               @db.Text
+  plannedActions Json                 // string[] — human-readable, shown in approval modal
+  source         String               @default("manual") // 'build' | 'repair' | 'manual' | 'live_test'
+  status         BrowserSessionStatus @default(pending_approval)
+  grantedAt      DateTime?
+  closedAt       DateTime?
+  closedReason   String?
+  createdAt      DateTime             @default(now())
+
+  user    User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  actions BrowserAction[]
+
+  @@map("browser_sessions")
+}
+
+enum BrowserSessionStatus {
+  pending_approval
+  active
+  completed
+  terminated_by_user
+  terminated_timeout
+  failed
+}
+
+model BrowserAction {
+  id                   String              @id @default(cuid())
+  sessionId            String
+  type                 BrowserActionType
+  description          String              // Human-readable: "Clicking 'Add Product' button"
+  target               String?             // CSS selector or URL
+  value                String?             // '[REDACTED]' for sensitive fields — NEVER raw secrets
+  screenshotBeforePath String?             // Relative path to file on disk (null for sensitive actions)
+  screenshotAfterPath  String?             // Relative path to file on disk (null for sensitive actions)
+  status               BrowserActionStatus @default(pending)
+  error                String?
+  executedAt           DateTime?
+  createdAt            DateTime            @default(now())
+
+  session BrowserSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@map("browser_actions")
+}
+
+enum BrowserActionType {
+  navigate
+  click
+  type_text
+  screenshot
+  wait
+  scroll
+  extract_text
+}
+
+enum BrowserActionStatus {
+  pending
+  executing
+  complete
+  failed
+}
+
+// ─── Builder Session ──────────────────────────────────────────
+// Tracks a guided AI Builder workflow session.
+// difyConversationId is server-side only — never returned to client.
+// spec stores the validated BuilderSpec JSON — never returns _difyRaw to client.
+
+model BuilderSession {
+  id                 String               @id @default(cuid())
+  userId             String
+  projectId          String?              // set after spec approval + project creation
+  builderType        String               // 'landing_page' | 'saas' | 'stripe_auth_supabase'
+  status             BuilderSessionStatus @default(in_progress)
+  difyConversationId String?              // Dify conversation ID — server-side only, never exposed
+  spec               Json?               // Validated BuilderSpec (set when workflow completes)
+  planId             String?              // set after spec → plan conversion on approve
+  jobId              String?              // set after plan approval → job queued
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
+  completedAt        DateTime?
+
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project Project? @relation(fields: [projectId], references: [id])
+
+  @@map("builder_sessions")
+}
+
+enum BuilderSessionStatus {
+  in_progress  // Dify workflow collecting inputs
+  spec_ready   // Workflow complete, spec validated, awaiting user approval
+  approved     // User approved spec, project + plan created
+  building     // Job queued and running
+  complete     // Build finished
+  abandoned    // User left without completing
+}
+
+// ─── Subscription ─────────────────────────────────────────────
+
+model Subscription {
+  id                 String             @id @default(cuid())
+  userId             String             @unique
+  plan               PlanTier           @default(basic)
+  status             SubscriptionStatus @default(trialing)
+  stripeCustomerId   String?            @unique
+  stripeSubId        String?            @unique
+  stripePriceId      String?
+  currentPeriodStart DateTime?
+  currentPeriodEnd   DateTime?
+  cancelAtPeriodEnd  Boolean            @default(false)
+  trialEnd           DateTime?
+  promoApplied       Boolean            @default(false)
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  user  User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  usage UsageRecord[]
+
+  @@map("subscriptions")
+}
+
+enum PlanTier {
+  free
+  basic
+  pro
+  teams
+}
+
+enum SubscriptionStatus {
+  trialing
+  active
+  past_due
+  canceled
+  incomplete
+  paused
+}
+
+// ─── Usage Record (monthly) ───────────────────────────────────
+
+model UsageRecord {
+  id             String   @id @default(cuid())
+  subscriptionId String
+  userId         String
+  creditsUsed    Int      @default(0)
+  creditsLimit   Int      @default(100)
+  storageUsedMb  Int      @default(0)
+  storageLimitMb Int      @default(5120)   // 5 GB default
+  projectCount   Int      @default(0)
+  projectLimit   Int      @default(5)
+  previewCount   Int      @default(0)
+  previewLimit   Int      @default(1)
+  periodStart    DateTime
+  periodEnd      DateTime
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  subscription Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+
+  @@map("usage_records")
+}
+
+// ─── File ─────────────────────────────────────────────────────
+
+model File {
+  id        String   @id @default(cuid())
+  projectId String?
+  chatId    String?
+  name      String
+  type      FileType
+  mimeType  String
+  size      Int
+  path      String
+  url       String?
+  createdAt DateTime @default(now())
+
+  project Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+
+  @@map("files")
+}
+
+enum FileType {
+  image
+  pdf
+  text
+  code
+  audio
+  other
+}
