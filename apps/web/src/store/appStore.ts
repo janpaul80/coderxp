@@ -99,13 +99,13 @@ interface AppStore {
     success: boolean; coverage: import('@/types').TestCoverageSummary | null
     failures: Array<{ suiteName: string; testName: string; error: string; filePath: string }>
   } | null
-  setTestResults: (results: NonNullable<AppState['testResults']> | null) => void
+  setTestResults: (results: NonNullable<AppStore['testResults']> | null) => void
   securityAudit: {
     securityScore: number; counts: Record<string, number>
     findings: import('@/types').SecurityFinding[]
     vulnerabilities: Array<{ name: string; version: string; severity: string; description: string }>
   } | null
-  setSecurityAudit: (audit: NonNullable<AppState['securityAudit']> | null) => void
+  setSecurityAudit: (audit: NonNullable<AppStore['securityAudit']> | null) => void
 
   // ── Multi-agent system state ─────────────────────────────
   agentPipeline: PipelineStatus

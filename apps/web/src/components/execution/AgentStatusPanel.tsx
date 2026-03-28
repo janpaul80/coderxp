@@ -26,6 +26,7 @@ const AGENT_ICONS: Record<AgentRole, React.ReactNode> = {
   image: <ImageIcon className="w-3.5 h-3.5" />,
   android: <Smartphone className="w-3.5 h-3.5" />,
   ios: <Apple className="w-3.5 h-3.5" />,
+  refactor: <Wrench className="w-3.5 h-3.5" />,
 }
 
 // ─── Status badge ────────────────────────────────────────────
