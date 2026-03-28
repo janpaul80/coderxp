@@ -5,8 +5,17 @@ import crypto from 'crypto'
 import { Prisma } from '@prisma/client'
 import { z } from 'zod'
 import rateLimit from 'express-rate-limit'
+import { createClient } from '@supabase/supabase-js'
 import { requireAuth, AuthRequest } from '../middleware/auth'
 import { prisma } from '../lib/prisma'
+
+// ─── Supabase admin client (server-side, service role) ────────
+// Used only to verify Supabase access tokens via getUser().
+const supabaseAdmin = createClient(
+  process.env.SUPABASE_URL ?? '',
+  process.env.SUPABASE_SERVICE_ROLE_KEY ?? '',
+  { auth: { autoRefreshToken: false, persistSession: false } }
+)
 
 const router: Router = Router()
 
@@ -173,6 +182,70 @@ router.post('/logout', requireAuth, async (req: AuthRequest, res: Response): Pro
     res.json({ success: true })
   } catch (err) {
     res.status(500).json({ error: 'Logout failed' })
+  }
+})
+
+// ─── POST /supabase — Supabase token exchange ─────────────────
+// Frontend sends a Supabase access token; we verify it, upsert
+// the user in our DB, create a backend Session, and return our JWT.
+
+router.post('/supabase', authLimiter, async (req: Request, res: Response): Promise<void> => {
+  try {
+    const authHeader = req.headers.authorization
+    if (!authHeader?.startsWith('Bearer ')) {
+      res.status(401).json({ error: 'Missing Supabase access token' })
+      return
+    }
+    const supabaseToken = authHeader.slice(7)
+
+    // Verify token with Supabase admin client
+    const { data: { user: supabaseUser }, error } = await supabaseAdmin.auth.getUser(supabaseToken)
+    if (error || !supabaseUser) {
+      res.status(401).json({ error: 'Invalid or expired Supabase token' })
+      return
+    }
+
+    const email = supabaseUser.email
+    if (!email) {
+      res.status(400).json({ error: 'Supabase user has no email address' })
+      return
+    }
+
+    // Derive display name from Supabase user metadata
+    const rawName =
+      (supabaseUser.user_metadata?.full_name as string | undefined) ??
+      (supabaseUser.user_metadata?.name as string | undefined) ??
+      email.split('@')[0]
+
+    // Upsert user — create if new, update name if changed
+    const user = await prisma.user.upsert({
+      where: { email },
+      create: {
+        email,
+        name: rawName,
+        // No password — Supabase-authed users don't use local passwords
+        password: '',
+      },
+      update: {
+        // Only update name if it was blank (don't overwrite user-set names)
+        name: rawName,
+      },
+      select: { id: true, name: true, email: true, createdAt: true },
+    })
+
+    // Issue backend JWT
+    const baseToken = jwt.sign(
+      { userId: user.id, email: user.email, jti: crypto.randomUUID() },
+      JWT_SECRET,
+      { expiresIn: JWT_EXPIRES_IN }
+    )
+
+    const token = await createSessionWithRetry(user.id, baseToken)
+
+    res.json({ user, token })
+  } catch (err) {
+    console.error('[Auth] Supabase exchange error:', err)
+    res.status(500).json({ error: 'Token exchange failed' })
   }
 })
 

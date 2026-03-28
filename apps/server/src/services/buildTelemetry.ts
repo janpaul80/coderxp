@@ -24,7 +24,16 @@ export type BuildFailureCategory =
   | 'unknown_failure'
 
 export type BuildLogLevel = 'info' | 'warn' | 'error' | 'success'
-export type BuildLogStep =
+export type BuildLogStep = 
+  | 'workspace_prepare'
+  | 'scaffold_generate' 
+  | 'files_write'
+  | 'scaffold_validate'
+  | 'install_deps'
+  | 'preview_start'
+  | 'preview_healthcheck'
+  | 'code_quality'
+  | string // fallback
   | 'scaffold_generate'
   | 'scaffold_validate'
   | 'workspace_prepare'

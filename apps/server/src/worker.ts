@@ -338,8 +338,13 @@ const worker = new Worker(
       currentPhase = 'preview_start'
       const previewInstance = await startPreview(jobId, workspacePath, addPreviewLog, previewCallbacks)
 
-      await addLog('success', `PREVIEW READY at ${previewInstance.url}`, 'complete', {
-        previewUrl: previewInstance.url,
+      // Public URL: routed through nginx → Node proxy → Vite dev server
+      // Remote users access via https://domain/api/preview/:jobId/app/
+      const clientUrl = (process.env.CLIENT_URL ?? 'http://localhost:3001').replace(/\/$/, '')
+      const publicPreviewUrl = `${clientUrl}/api/preview/${jobId}/app/`
+
+      await addLog('success', `PREVIEW READY at ${publicPreviewUrl}`, 'complete', {
+        previewUrl: publicPreviewUrl,
         previewPort: previewInstance.port,
         previewPid: previewInstance.pid,
       })
@@ -348,7 +353,7 @@ const worker = new Worker(
         status: 'complete',
         currentStep: 'Preview ready',
         progress: 100,
-        previewUrl: previewInstance.url,
+        previewUrl: publicPreviewUrl,
         previewPort: previewInstance.port,
         previewPid: previewInstance.pid,
         previewStatus: 'ready',
@@ -362,8 +367,8 @@ const worker = new Worker(
       await prisma.job.update({ where: { id: jobId }, data: { logs: allLogs as unknown as Prisma.InputJsonValue } })
       await prisma.project.update({ where: { id: projectId }, data: { status: 'ready' } })
 
-      void emitToUser(userId, 'job:complete', { jobId, previewUrl: previewInstance.url, previewPort: previewInstance.port, previewPid: previewInstance.pid })
-      void emitToUser(userId, 'preview:ready', { jobId, url: previewInstance.url, port: previewInstance.port, pid: previewInstance.pid })
+      void emitToUser(userId, 'job:complete', { jobId, previewUrl: publicPreviewUrl, previewPort: previewInstance.port, previewPid: previewInstance.pid })
+      void emitToUser(userId, 'preview:ready', { jobId, url: publicPreviewUrl, port: previewInstance.port, pid: previewInstance.pid })
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Build failed'
       const errorDetails = err instanceof Error && err.stack ? err.stack.slice(0, 2000) : null

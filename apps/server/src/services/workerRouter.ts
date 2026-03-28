@@ -282,6 +282,25 @@ export function selectWorker(localBuilderQueue: Queue): WorkerSelection {
   }
 }
 
+// ─── Worker base URL resolver (for cross-server preview proxy) ───
+
+/**
+ * Returns the base HTTP URL for a named worker.
+ * Used by preview.ts to proxy preview requests to the correct server.
+ *
+ * Returns null for 'local' or unknown worker names.
+ */
+export function getWorkerBaseUrl(workerName: string): string | null {
+  if (!workerName || workerName === 'local') return null
+  if (workerName === PRIMARY_NAME && PRIMARY_URL) return PRIMARY_URL
+  if (workerName === FAILOVER_NAME && FAILOVER_URL) return FAILOVER_URL
+  // Tertiary / additional workers: check env pattern WORKER_<NAME>_URL
+  const envKey = `WORKER_${workerName.toUpperCase()}_URL`
+  const envVal = process.env[envKey]
+  if (envVal) return envVal
+  return null
+}
+
 // ─── Public health status (for monitoring endpoints) ─────────
 
 export function getWorkerHealthStatus(): {

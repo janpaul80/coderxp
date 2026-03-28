@@ -136,3 +136,57 @@ jobsRouter.get('/active/completed', requireAuth, async (req: AuthRequest, res: R
     return res.status(500).json({ error: message })
   }
 })
+
+// ─── GET /api/jobs/:jobId — single job by ID ────────────────
+// Used by capability test polling fallback and external tooling.
+// MUST be registered AFTER /active and /active/completed to avoid
+// Express matching "active" as a :jobId parameter.
+
+jobsRouter.get('/:jobId', requireAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const job = await prisma.job.findFirst({
+      where: {
+        id: req.params.jobId,
+        project: { userId: req.userId! },
+      },
+      include: {
+        project: { select: { id: true, name: true, userId: true } },
+      },
+    }) as JobWithProject | null
+
+    if (!job) {
+      return res.status(404).json({ error: 'Not found' })
+    }
+
+    return res.json({
+      id: job.id,
+      projectId: job.projectId,
+      planId: job.planId,
+      status: job.status,
+      currentStep: job.currentStep ?? null,
+      progress: job.progress,
+      previewUrl: job.previewUrl ?? null,
+      previewPort: job.previewPort ?? null,
+      previewStatus: job.previewStatus ?? null,
+      fileCount: job.fileCount ?? null,
+      totalBytes: job.totalBytes ?? null,
+      generatedFileCount: job.generatedFileCount ?? null,
+      generatedTotalBytes: job.generatedTotalBytes ?? null,
+      generatedKeyFiles: job.generatedKeyFiles ?? null,
+      failureCategory: job.failureCategory ?? null,
+      error: job.error ?? null,
+      errorDetails: job.errorDetails ?? null,
+      buildMeta: job.buildMeta ?? null,
+      commandSummary: job.commandSummary ?? null,
+      workspacePath: job.workspacePath ?? null,
+      startedAt: job.startedAt ?? null,
+      completedAt: job.completedAt ?? null,
+      createdAt: job.createdAt,
+      updatedAt: job.updatedAt,
+      project: job.project,
+    })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Failed to get job'
+    return res.status(500).json({ error: message })
+  }
+})

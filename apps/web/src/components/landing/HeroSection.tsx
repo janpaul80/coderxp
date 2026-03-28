@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useAuthStore } from '@/store/authStore'
-import { HoleBackground } from '@/components/ui/HoleBackground'
+import { ElegantShape } from '@/components/ui/shape-landing-hero'
 
 // ─── Typing animation phrases ─────────────────────────────────
 const PHRASES = [
@@ -197,15 +197,54 @@ export function HeroSection() {
       className="relative min-h-screen flex flex-col items-center justify-center px-6 pt-24 pb-20 overflow-hidden"
       style={{ backgroundColor: '#000000' }}
     >
-      {/* Hole background effect — hero-only, behind headline + chatbox */}
-      <div className="absolute inset-0 pointer-events-none">
-        <HoleBackground
-          strokeColor="rgba(255,255,255,0.07)"
-          numberOfLines={40}
-          numberOfDiscs={40}
-          particleRGBColor={[200, 200, 220]}
-          className="w-full h-full"
+      {/* Shape background — floating geometric ellipses, no text */}
+      <div className="absolute inset-0 pointer-events-none overflow-hidden">
+        {/* Ambient gradient */}
+        <div className="absolute inset-0 bg-gradient-to-br from-indigo-500/[0.05] via-transparent to-rose-500/[0.05] blur-3xl" />
+
+        <ElegantShape
+          delay={0.3}
+          width={600}
+          height={140}
+          rotate={12}
+          gradient="from-indigo-500/[0.15]"
+          className="left-[-10%] md:left-[-5%] top-[15%] md:top-[20%]"
         />
+        <ElegantShape
+          delay={0.5}
+          width={500}
+          height={120}
+          rotate={-15}
+          gradient="from-rose-500/[0.15]"
+          className="right-[-5%] md:right-[0%] top-[70%] md:top-[75%]"
+        />
+        <ElegantShape
+          delay={0.4}
+          width={300}
+          height={80}
+          rotate={-8}
+          gradient="from-violet-500/[0.15]"
+          className="left-[5%] md:left-[10%] bottom-[5%] md:bottom-[10%]"
+        />
+        <ElegantShape
+          delay={0.6}
+          width={200}
+          height={60}
+          rotate={20}
+          gradient="from-amber-500/[0.15]"
+          className="right-[15%] md:right-[20%] top-[10%] md:top-[15%]"
+        />
+        <ElegantShape
+          delay={0.7}
+          width={150}
+          height={40}
+          rotate={-25}
+          gradient="from-cyan-500/[0.15]"
+          className="left-[20%] md:left-[25%] top-[5%] md:top-[10%]"
+        />
+
+        {/* Top/bottom fade to blend with page */}
+        <div className="absolute inset-0 bg-gradient-to-t from-[#000000] via-transparent to-[#000000]/80 pointer-events-none" />
       </div>
 
       <div className="relative z-10 w-full max-w-3xl mx-auto flex flex-col items-center text-center">
@@ -283,12 +322,12 @@ export function HeroSection() {
             </div>
 
             {/* Toolbar */}
-            <div className="flex items-center justify-between px-3 pb-3.5 pt-1">
+            <div className="flex items-center justify-between px-3 pb-3.5 pt-1 gap-2">
               {/* Left tools */}
-              <div className="flex items-center gap-0.5">
+              <div className="flex items-center gap-0.5 min-w-0">
                 {/* Attach */}
                 <button
-                  className="p-2 rounded-lg text-white/30 hover:text-white/60 hover:bg-white/[0.05] transition-all"
+                  className="p-2 rounded-lg text-white/30 hover:text-white/60 hover:bg-white/[0.05] transition-all flex-shrink-0"
                   title="Attach file"
                   onClick={() => navigate(isAuthenticated ? '/workspace' : '/auth?mode=register')}
                 >
@@ -297,7 +336,7 @@ export function HeroSection() {
 
                 {/* GitHub — subtle toolbar icon, not a link block */}
                 <button
-                  className="p-2 rounded-lg text-white/30 hover:text-white/60 hover:bg-white/[0.05] transition-all"
+                  className="p-2 rounded-lg text-white/30 hover:text-white/60 hover:bg-white/[0.05] transition-all flex-shrink-0"
                   title="Import from GitHub"
                   onClick={() => navigate(isAuthenticated ? '/workspace' : '/auth?mode=register')}
                 >
@@ -308,7 +347,7 @@ export function HeroSection() {
                 {voiceSupported && (
                   <button
                     onClick={handleVoice}
-                    className={`p-2 rounded-lg transition-all ${
+                    className={`p-2 rounded-lg transition-all flex-shrink-0 ${
                       listening
                         ? 'text-red-400 bg-red-400/10'
                         : 'text-white/30 hover:text-white/60 hover:bg-white/[0.05]'
@@ -319,17 +358,17 @@ export function HeroSection() {
                   </button>
                 )}
 
-                {/* Divider */}
-                <div className="w-px h-4 bg-white/[0.08] mx-1.5" />
+                {/* Divider — hidden on mobile, visible on sm+ */}
+                <div className="hidden sm:block w-px h-4 bg-white/[0.08] mx-1.5 flex-shrink-0" />
 
                 {/* Model selector */}
-                <div ref={modelRef} className="relative">
+                <div ref={modelRef} className="relative flex-shrink-0">
                   <button
                     onClick={() => setModelOpen(!modelOpen)}
-                    className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs text-white/50 hover:text-white/80 hover:bg-white/[0.05] border border-white/[0.08] transition-all"
+                    className="flex items-center gap-1.5 px-2 sm:px-2.5 py-1.5 rounded-lg text-xs text-white/50 hover:text-white/80 hover:bg-white/[0.05] border border-white/[0.08] transition-all"
                   >
                     <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 flex-shrink-0" />
-                    {selectedModel.label}
+                    <span className="hidden sm:inline">{selectedModel.label}</span>
                     <ChevronDownIcon />
                   </button>
 

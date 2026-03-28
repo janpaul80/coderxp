@@ -2,12 +2,14 @@ import React, { lazy, Suspense } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { AuthPage } from '@/pages/AuthPage'
+import { AuthCallbackPage } from '@/pages/AuthCallbackPage'
 import { WorkspacePage } from '@/pages/WorkspacePage'
 import { useAuthStore } from '@/store/authStore'
 
 // Lazy-load public pages (not on the critical workspace path)
 const LandingPage = lazy(() => import('@/pages/LandingPage'))
 const AboutPage = lazy(() => import('@/pages/AboutPage'))
+const DocsPage = lazy(() => import('@/pages/DocsPage'))
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -47,6 +49,9 @@ export default function App() {
             {/* About page */}
             <Route path="/about" element={<AboutPage />} />
 
+            {/* API Documentation */}
+            <Route path="/docs" element={<DocsPage />} />
+
             {/* Auth — redirects to /workspace if already logged in */}
             <Route
               path="/auth"
@@ -56,6 +61,9 @@ export default function App() {
                 </PublicAuthRoute>
               }
             />
+
+            {/* OAuth callback — Supabase redirects here after Google/GitHub login */}
+            <Route path="/auth/callback" element={<AuthCallbackPage />} />
 
             {/* Protected workspace */}
             <Route

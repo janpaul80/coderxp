@@ -197,6 +197,45 @@ billingRouter.post('/checkout', requireAuth, async (req: AuthRequest, res: Respo
   }
 })
 
+// ─── POST /billing/create-checkout — generic checkout for plans + credit packs ──
+
+const createCheckoutSchema = z.object({
+  priceId: z.string().min(1),
+})
+
+billingRouter.post('/create-checkout', requireAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const { priceId } = createCheckoutSchema.parse(req.body)
+
+    if (!process.env.STRIPE_SECRET_KEY) {
+      return res.status(503).json({
+        error: 'Billing not yet configured',
+        message: 'Stripe integration coming soon. Connect your STRIPE_SECRET_KEY to enable billing.',
+        priceId,
+      })
+    }
+
+    // TODO: Wire Stripe checkout session creation
+    // const stripe = new Stripe(process.env.STRIPE_SECRET_KEY)
+    // const session = await stripe.checkout.sessions.create({
+    //   mode: priceId.startsWith('price_credits_') ? 'payment' : 'subscription',
+    //   line_items: [{ price: priceId, quantity: 1 }],
+    //   success_url: `${process.env.FRONTEND_URL}/workspace?checkout=success`,
+    //   cancel_url: `${process.env.FRONTEND_URL}/workspace?checkout=cancelled`,
+    //   customer_email: req.userId ? (await prisma.user.findUnique({ where: { id: req.userId } }))?.email : undefined,
+    // })
+    // return res.json({ url: session.url })
+
+    res.status(501).json({ error: 'Stripe checkout not yet implemented', priceId })
+  } catch (err) {
+    if (err instanceof z.ZodError) {
+      return res.status(400).json({ error: 'Invalid request', details: err.errors })
+    }
+    console.error('[billing] create-checkout error:', err)
+    res.status(500).json({ error: 'Checkout failed' })
+  }
+})
+
 // ─── POST /billing/portal — Stripe customer portal ───────────
 
 billingRouter.post('/portal', requireAuth, async (req: AuthRequest, res: Response) => {

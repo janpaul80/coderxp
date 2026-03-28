@@ -196,4 +196,36 @@ export const jobsApi = {
     api.get<{ job: Record<string, unknown> | null }>('/api/jobs/active/completed'),
 }
 
+// ─── Rules ────────────────────────────────────────────────────
+
+export interface UserRule {
+  id: string
+  content: string
+  category: 'stack' | 'style' | 'deploy' | 'install' | 'general'
+  active: boolean
+  createdAt: string
+}
+
+export const rulesApi = {
+  // User-level rules
+  getUserRules: () =>
+    api.get<{ rules: UserRule[] }>('/api/memory/rules/user'),
+
+  upsertUserRule: (rule: Omit<UserRule, 'createdAt'> & { createdAt?: string }) =>
+    api.post<{ rule: UserRule }>('/api/memory/rules/user', rule),
+
+  deleteUserRule: (ruleId: string) =>
+    api.delete(`/api/memory/rules/user/${ruleId}`),
+
+  // Project-level rules
+  getProjectRules: (projectId: string) =>
+    api.get<{ rules: UserRule[] }>(`/api/memory/rules/project/${projectId}`),
+
+  upsertProjectRule: (projectId: string, rule: Omit<UserRule, 'createdAt'> & { createdAt?: string }) =>
+    api.post<{ rule: UserRule }>(`/api/memory/rules/project/${projectId}`, rule),
+
+  deleteProjectRule: (projectId: string, ruleId: string) =>
+    api.delete(`/api/memory/rules/project/${projectId}/${ruleId}`),
+}
+
 export default api

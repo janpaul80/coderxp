@@ -7,8 +7,9 @@ import { Link } from 'react-router-dom'
 // and Twitter/X link.
 
 const PRODUCT_LINKS = [
+  { label: 'Showcase', href: '/#showcase' },
+  { label: 'How It Works', href: '/#how-it-works' },
   { label: 'Features', href: '/#features' },
-  { label: 'About Us', href: '/about' },
 ]
 
 const RESOURCES_LINKS = [
@@ -89,7 +90,7 @@ export function FooterSection() {
           style={{ borderTop: '1px solid rgba(255,255,255,0.05)' }}
         >
           <p className="text-xs text-white/25">
-            &copy; {new Date().getFullYear()} CodedXP. Built for the VIBE era.
+            &copy; {new Date().getFullYear()} CoderXP. Built for the VIBE era.
           </p>
 
           <div className="flex items-center gap-4">

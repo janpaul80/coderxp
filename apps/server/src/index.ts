@@ -26,11 +26,18 @@ import browserRouter from './routes/browser'
 import { jobsRouter } from './routes/jobs'
 import { workspacesRouter } from './routes/workspaces'
 import { buildersRouter } from './routes/builders'
+import { publishRouter } from './routes/publish'
+import { agentsRouter } from './routes/agents'
+import { visualBuilderRouter } from './routes/visualBuilder'
+import { apiKeysRouter } from './routes/apiKeys'
 import { registerSocketEvents } from './socket/events'
 import { cleanupAllPreviews, startPreviewLifecycleManager, stopPreviewLifecycleManager } from './services/previewManager'
 import { cleanupAllSessions } from './services/browserControl'
 import { getProviderStatus } from './lib/providers'
+import { getAgentRegistry } from './agents'
+import { connectStatusBridge, disconnectStatusBridge } from './agents/socketBridge'
 import { startHealthPolling, stopHealthPolling } from './services/workerRouter'
+import { registerBuiltinPlugins, pluginRegistry } from './services/pluginSystem'
 
 // ─── Ensure required directories exist at startup ────────────
 
@@ -45,11 +52,10 @@ const httpServer = createServer(app)
 
 // ─── CORS origin list ─────────────────────────────────────────
 // Supports:
-//   - CLIENT_URL env var (single origin, e.g. https://coderxp.app)
+//   - CLIENT_URL env var (single origin, e.g. https://yourdomain.com)
 //   - CORS_ORIGINS env var (comma-separated list for multi-origin)
 //   - localhost:5173 always allowed in development
-//   - www.coderxp.app always redirected to apex by nginx, but allowed here
-//     in case requests arrive before the redirect
+//   - www.<domain> variant automatically added for any production CLIENT_URL
 
 function buildCorsOrigins(): string | string[] | RegExp {
   // Explicit multi-origin list takes priority
@@ -60,11 +66,15 @@ function buildCorsOrigins(): string | string[] | RegExp {
   const clientUrl = process.env.CLIENT_URL
 
   if (clientUrl && clientUrl !== 'http://localhost:5173') {
-    // Production: allow apex + www + localhost dev
+    // Production: allow apex + www variant + localhost dev
     const origins: string[] = [clientUrl]
-    // Add www variant if not already present
-    if (clientUrl.includes('://coderxp.app')) {
-      origins.push('https://www.coderxp.app')
+    // Generically add www. variant for any non-localhost production domain
+    // e.g. https://example.com → https://www.example.com
+    if (!clientUrl.includes('localhost') && !clientUrl.includes('127.0.0.1')) {
+      const wwwVariant = clientUrl.replace('://', '://www.')
+      if (!origins.includes(wwwVariant)) {
+        origins.push(wwwVariant)
+      }
     }
     // Always allow local dev
     origins.push('http://localhost:5173', 'http://localhost:3000')
@@ -117,9 +127,16 @@ app.use('/api/browser', browserRouter)
 app.use('/api/jobs', jobsRouter)
 app.use('/api/workspaces', workspacesRouter)
 app.use('/api/builders', buildersRouter)
+app.use('/api/publish', publishRouter)
+app.use('/api/agents', agentsRouter)
+app.use('/api/vb', visualBuilderRouter)
+app.use('/api/keys', apiKeysRouter)
 
-// Health check
+// Health check — available at both /health (nginx direct) and /api/health (nginx /api/ proxy)
 app.get('/health', (_req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() })
+})
+app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() })
 })
 
@@ -142,6 +159,7 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
 // ─── Socket events ────────────────────────────────────────────
 
 registerSocketEvents(io)
+connectStatusBridge(io)
 
 // ─── Start ────────────────────────────────────────────────────
 
@@ -150,7 +168,14 @@ const PORT = parseInt(process.env.PORT ?? '3001', 10)
 httpServer.listen(PORT, () => {
   console.log(`\n🚀 CodedXP Server running on http://localhost:${PORT}`)
   console.log(`   Socket.io ready`)
-  console.log(`   Environment: ${process.env.NODE_ENV ?? 'development'}\n`)
+  console.log(`   Environment: ${process.env.NODE_ENV ?? 'development'}`)
+  // Initialize agent registry (logs all agent configs)
+  const registry = getAgentRegistry()
+  console.log(`   Agent Registry: ${registry.size} agents loaded`)
+  // Initialize plugin system with built-in plugins
+  registerBuiltinPlugins()
+  const pluginStatus = pluginRegistry.getStatus()
+  console.log(`   Plugin System: ${pluginStatus.total} plugins (${pluginStatus.enabled} enabled)\n`)
   // Start worker health polling (no-op if no remote workers configured)
   startHealthPolling()
   // Start preview lifecycle manager (auto-kill previews older than 2h)
@@ -163,6 +188,7 @@ function gracefulShutdown(signal: string) {
   console.log(`\n[Server] ${signal} received — cleaning up preview processes...`)
   stopHealthPolling()
   stopPreviewLifecycleManager()
+  disconnectStatusBridge()
   cleanupAllPreviews()
   cleanupAllSessions()
   httpServer.close(() => {

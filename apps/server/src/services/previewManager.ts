@@ -19,6 +19,9 @@
 import { spawn, execSync, ChildProcess } from 'child_process'
 import net from 'net'
 import http from 'http'
+import * as fs from 'fs'
+import * as path from 'path'
+import { emitPreviewStatus } from '../agents'
 
 // ─── Types ────────────────────────────────────────────────────
 
@@ -135,32 +138,128 @@ function makePreviewLog(
   }
 }
 
-// ─── npm install ──────────────────────────────────────────────
+// ─── dependency install (pnpm preferred, npm fallback) ───────
 
-const NPM_INSTALL_TIMEOUT_MS = 5 * 60 * 1000 // 5 minutes
+// Windows + cold cache can be slow; pnpm cached installs are fast.
+// 6 minutes for first attempt, 4 minutes for retries (cache is warm).
+const INSTALL_TIMEOUT_MS = 6 * 60 * 1000
+const INSTALL_RETRY_TIMEOUT_MS = 4 * 60 * 1000
+
+// Detect available package manager — pnpm is ~10x faster and uses a global
+// content-addressed store, so repeated installs download zero bytes.
+function detectPackageManager(): 'pnpm' | 'npm' {
+  try {
+    execSync('pnpm --version', { stdio: 'ignore', timeout: 5000 })
+    return 'pnpm'
+  } catch {
+    return 'npm'
+  }
+}
+
+export const PKG_MANAGER = detectPackageManager()
+
+/**
+ * Safely remove node_modules — Windows can throw EPERM/EBUSY on first try
+ * because file handles haven't fully released. Retries up to 3 times with
+ * increasing delays.
+ */
+function sleepSync(ms: number): void {
+  const end = Date.now() + ms
+  while (Date.now() < end) { /* busy-wait for short delays */ }
+}
+
+function safeRemoveNodeModules(dir: string): void {
+  const nmPath = path.join(dir, 'node_modules')
+  if (!fs.existsSync(nmPath)) return
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      fs.rmSync(nmPath, { recursive: true, force: true })
+      return
+    } catch {
+      // On Windows, EPERM/EBUSY can occur if handles aren't released yet
+      if (attempt < 2) {
+        sleepSync((attempt + 1) * 1000)
+      }
+    }
+  }
+}
 
 export function runNpmInstall(
   jobId: string,
   workspacePath: string,
   onLog: (log: PreviewLogEntry) => void,
   callbacks?: PreviewTelemetryCallbacks,
-  options?: { legacyPeerDeps?: boolean }
+  options?: { legacyPeerDeps?: boolean; isRetry?: boolean; ignoreScripts?: boolean }
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const startTime = Date.now()
-    const flags = options?.legacyPeerDeps
-      ? ['install', '--legacy-peer-deps', '--no-audit', '--no-fund']
-      : ['install', '--prefer-offline', '--no-audit', '--no-fund']
+    const timeoutMs = options?.isRetry ? INSTALL_RETRY_TIMEOUT_MS : INSTALL_TIMEOUT_MS
+
+    let cmd: string
+    let flags: string[]
+    if (PKG_MANAGER === 'pnpm') {
+      // Always write .npmrc for pnpm hoisted layout (overwrite to ensure correct content).
+      // store-dir ensures pnpm finds the global content-addressed store even when the
+      // workspace is deeply nested under a different monorepo root.
+      const pnpmStorePath = process.env.PNPM_STORE_DIR || ''
+      const storeDirective = pnpmStorePath ? `store-dir=${pnpmStorePath}\n` : ''
+      const npmrcPath = path.join(workspacePath, '.npmrc')
+      fs.writeFileSync(
+        npmrcPath,
+        `node-linker=hoisted\nshamefully-hoist=true\nprefer-offline=true\n${storeDirective}`
+      )
+      // Isolate workspace from parent monorepo — pnpm traverses up and finds
+      // the root pnpm-workspace.yaml, causing "Scope: all N workspace projects"
+      // and TTY prompts that abort in non-interactive contexts.
+      const wsYaml = path.join(workspacePath, 'pnpm-workspace.yaml')
+      if (!fs.existsSync(wsYaml)) {
+        fs.writeFileSync(wsYaml, 'packages: []\n')
+      }
+      flags = [
+        'install',
+        '--no-frozen-lockfile',
+        '--no-strict-peer-dependencies',
+        '--prefer-offline',          // use global store / cache first
+        '--no-optional',             // skip optional native modules (often fail on Windows)
+      ]
+      if (options?.ignoreScripts) flags.push('--ignore-scripts')
+      cmd = 'pnpm'
+    } else {
+      const base = ['install', '--prefer-offline', '--no-audit', '--no-fund', '--no-optional']
+      if (options?.legacyPeerDeps) base.push('--legacy-peer-deps')
+      if (options?.ignoreScripts) base.push('--ignore-scripts')
+      flags = base
+      cmd = 'npm'
+    }
+
+    // Belt-and-suspenders: env vars for offline-first + network hardening.
+    // Both npm and pnpm respect npm_config_* env vars.
+    // CI=true is CRITICAL — pnpm aborts with ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY
+    // when running in non-interactive contexts (no TTY) without CI=true.
+    const installEnv: Record<string, string | undefined> = {
+      ...process.env,
+      CI: 'true',
+      FORCE_COLOR: '0',
+      NODE_ENV: 'development',
+      npm_config_prefer_offline: 'true',
+      npm_config_optional: 'false',              // skip optional native modules
+      npm_config_fetch_timeout: '60000',
+      npm_config_fetch_retries: '3',
+      npm_config_fetch_retry_mintimeout: '5000',
+      npm_config_fetch_retry_maxtimeout: '30000',
+      npm_config_progress: 'false',
+    }
+
     const flagStr = flags.slice(1).join(' ')
 
-    onLog(makePreviewLog(jobId, 'info', `RUN npm ${flagStr} (cwd: ${workspacePath})`))
-    onLog(makePreviewLog(jobId, 'info', `TIMEOUT 5 minutes`))
+    onLog(makePreviewLog(jobId, 'info', `RUN ${cmd} ${flagStr} (cwd: ${workspacePath})`))
+    onLog(makePreviewLog(jobId, 'info', `TIMEOUT ${timeoutMs / 60000} minutes (${cmd}, retry=${options?.isRetry ?? false}, ignoreScripts=${options?.ignoreScripts ?? false})`))
     callbacks?.onPhase?.('installing', { cwd: workspacePath, legacyPeerDeps: options?.legacyPeerDeps ?? false })
 
-    const child = spawn('npm', flags, {
+    const child = spawn(cmd, flags, {
       cwd: workspacePath,
       shell: true,
-      env: { ...process.env, FORCE_COLOR: '0' },
+      env: installEnv,
     })
 
     let lastStderr = ''
@@ -187,12 +286,16 @@ export function runNpmInstall(
       }
     })
 
-    // Timeout
+    // Timeout — use platform-aware kill on Windows
     const timer = setTimeout(() => {
       timedOut = true
-      child.kill('SIGKILL')
-      reject(new Error(`npm install timed out after 5 minutes`))
-    }, NPM_INSTALL_TIMEOUT_MS)
+      if (process.platform === 'win32' && child.pid) {
+        try { execSync(`taskkill /F /T /PID ${child.pid}`, { stdio: 'ignore' }) } catch {}
+      } else {
+        child.kill('SIGKILL')
+      }
+      reject(new Error(`${cmd} install timed out after ${timeoutMs / 60000} minutes`))
+    }, timeoutMs)
 
     child.on('close', (code) => {
       clearTimeout(timer)
@@ -203,7 +306,7 @@ export function runNpmInstall(
 
       const summary = {
         phase: 'installing' as const,
-        command: `npm ${flagStr}`,
+        command: `${cmd} ${flagStr}`,
         cwd: workspacePath,
         exitCode: code ?? null,
         durationMs,
@@ -214,10 +317,10 @@ export function runNpmInstall(
       callbacks?.onCommandSummary?.(summary)
 
       if (code === 0) {
-        onLog(makePreviewLog(jobId, 'success', `DEPS npm install completed in ${durationSec}s`))
+        onLog(makePreviewLog(jobId, 'success', `DEPS ${cmd} install completed in ${durationSec}s`))
         resolve()
       } else {
-        const msg = `npm install failed with exit code ${code}. Last stderr: ${lastStderr}`
+        const msg = `${cmd} install failed with exit code ${code}. Last stderr: ${lastStderr}`
         onLog(makePreviewLog(jobId, 'error', `DEPS FAILED: ${msg}`))
         callbacks?.onFailure?.({ phase: 'installing', error: new Error(msg), commandSummary: summary })
         reject(new Error(msg))
@@ -226,7 +329,7 @@ export function runNpmInstall(
 
     child.on('error', (err) => {
       clearTimeout(timer)
-      const msg = `npm install process error: ${err.message}`
+      const msg = `${cmd} install process error: ${err.message}`
       onLog(makePreviewLog(jobId, 'error', msg))
       callbacks?.onFailure?.({ phase: 'installing', error: new Error(msg) })
       reject(new Error(msg))
@@ -240,13 +343,13 @@ const HEALTH_CHECK_INTERVAL_MS = 2000
 const HEALTH_CHECK_TIMEOUT_MS  = 60 * 1000  // 60 seconds (default)
 const HEALTH_CHECK_TIMEOUT_EXTENDED_MS = 120 * 1000 // 120 seconds (repair attempt)
 
-function httpGet(url: string): Promise<number> {
+function httpGet(url: string, timeoutMs = 3000): Promise<number> {
   return new Promise((resolve, reject) => {
     const req = http.get(url, (res) => {
       res.resume() // drain
       resolve(res.statusCode ?? 0)
     })
-    req.setTimeout(3000, () => {
+    req.setTimeout(timeoutMs, () => {
       req.destroy()
       reject(new Error('timeout'))
     })
@@ -298,10 +401,11 @@ export function startViteProcess(
   onLog: (log: PreviewLogEntry) => void,
   callbacks?: PreviewTelemetryCallbacks
 ): ChildProcess {
-  onLog(makePreviewLog(jobId, 'info', `RUN npx vite --port ${port} --host 0.0.0.0 (cwd: ${workspacePath})`))
+  const viteBase = `/api/preview/${jobId}/app/`
+  onLog(makePreviewLog(jobId, 'info', `RUN npx vite --port ${port} --host 0.0.0.0 --base ${viteBase} (cwd: ${workspacePath})`))
   callbacks?.onPhase?.('starting', { port, cwd: workspacePath })
 
-  const child = spawn('npx', ['vite', '--port', String(port), '--host', '0.0.0.0'], {
+  const child = spawn('npx', ['vite', '--port', String(port), '--host', '0.0.0.0', '--base', viteBase], {
     cwd: workspacePath,
     shell: true,
     env: { ...process.env, FORCE_COLOR: '0', NODE_ENV: 'development' },
@@ -339,27 +443,77 @@ export async function startPreview(
   callbacks?: PreviewTelemetryCallbacks
 ): Promise<PreviewInstance> {
   const installStart = Date.now()
+  emitPreviewStatus('starting', `Preview starting for job ${jobId}`)
 
-  // Step 1: npm install — with autonomous repair fallback (--legacy-peer-deps)
-  try {
-    await runNpmInstall(jobId, workspacePath, onLog, callbacks)
-  } catch (installErr) {
-    const reason = installErr instanceof Error ? installErr.message : String(installErr)
-    onLog(makePreviewLog(jobId, 'info', `REPAIR: npm install failed — retrying with --legacy-peer-deps`))
-    await callbacks?.onRepairAttempt?.({
-      phase: 'installing',
-      attempt: 1,
-      reason,
-      strategy: 'legacy-peer-deps',
+  // Step 1: install dependencies — with multi-tier retry fallback
+  //
+  // Attempt 1: normal install (pnpm --prefer-offline or npm --prefer-offline)
+  // Attempt 2: retry with relaxed settings:
+  //   - pnpm: clear node_modules and retry (global store means cache is still warm)
+  //   - npm:  add --legacy-peer-deps
+  // Attempt 3: last resort — --ignore-scripts (post-install scripts are the #1
+  //   cause of hangs/failures on Windows)
+  // Windows-specific: safe node_modules cleanup with EPERM retry, taskkill for hangs.
+  let installAttempt = 0
+  const installWithRetry = async () => {
+    // ─ Attempt 1: normal install ─
+    installAttempt = 1
+    try {
+      await runNpmInstall(jobId, workspacePath, onLog, callbacks)
+      return
+    } catch (err1) {
+      const reason1 = err1 instanceof Error ? err1.message : String(err1)
+      const strategy1 = PKG_MANAGER === 'pnpm' ? 'clean-node-modules-retry' : 'legacy-peer-deps'
+      onLog(makePreviewLog(jobId, 'info', `REPAIR: ${PKG_MANAGER} install attempt 1 failed — retrying (${strategy1})`))
+      await callbacks?.onRepairAttempt?.({ phase: 'installing', attempt: 1, reason: reason1, strategy: strategy1 })
+    }
+
+    // ─ Attempt 2: relaxed settings ─
+    installAttempt = 2
+    onLog(makePreviewLog(jobId, 'info', 'REPAIR: removing partial node_modules + lockfiles before retry (safe cleanup)'))
+    safeRemoveNodeModules(workspacePath)
+    // Remove stale lockfiles that can cause "lockfile out of date" errors
+    for (const lockfile of ['pnpm-lock.yaml', 'package-lock.json']) {
+      const lockPath = path.join(workspacePath, lockfile)
+      try { if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath) } catch {}
+    }
+
+    try {
+      await runNpmInstall(jobId, workspacePath, onLog, callbacks, {
+        legacyPeerDeps: PKG_MANAGER === 'npm',
+        isRetry: true,
+      })
+      return
+    } catch (err2) {
+      const reason2 = err2 instanceof Error ? err2.message : String(err2)
+      const strategy2 = 'ignore-scripts-fallback'
+      onLog(makePreviewLog(jobId, 'info', `REPAIR: ${PKG_MANAGER} install attempt 2 failed — last resort (${strategy2})`))
+      await callbacks?.onRepairAttempt?.({ phase: 'installing', attempt: 2, reason: reason2, strategy: strategy2 })
+    }
+
+    // ─ Attempt 3: ignore-scripts last resort ─
+    installAttempt = 3
+    safeRemoveNodeModules(workspacePath)
+
+    await runNpmInstall(jobId, workspacePath, onLog, callbacks, {
+      legacyPeerDeps: PKG_MANAGER === 'npm',
+      isRetry: true,
+      ignoreScripts: true,
     })
-    // Repair attempt: retry with --legacy-peer-deps (no onFailure on first failure)
-    await runNpmInstall(jobId, workspacePath, onLog, callbacks, { legacyPeerDeps: true })
   }
+  await installWithRetry()
   const installDurationMs = Date.now() - installStart
 
   // Step 2: allocate port
   const port = await allocatePort()
-  const url = `http://localhost:${port}`
+  // Root URL — vite responds to this immediately with a 302 redirect (before pre-bundling).
+  // We do NOT use this for the health check because a 302 does not mean the app is compiled.
+  const rootUrl = `http://localhost:${port}`
+  // Full base path — vite must pre-bundle all dependencies before it can serve this.
+  // Probing this URL forces vite to compile the app during the health check phase,
+  // so preview:ready is only emitted after the app is actually ready to serve.
+  const viteBase = `/api/preview/${jobId}/app/`
+  const appUrl = `${rootUrl}${viteBase}`
   onLog(makePreviewLog(jobId, 'info', `PORT allocated: ${port}`))
 
   // Step 3: start Vite
@@ -369,26 +523,67 @@ export async function startPreview(
   const pid = child.pid ?? 0
   onLog(makePreviewLog(jobId, 'info', `VITE started (PID: ${pid})`))
 
-  // Step 4: health check — with autonomous repair fallback (extended 120s timeout)
-  let healthy = await waitForHealthy(jobId, url, onLog, callbacks, HEALTH_CHECK_TIMEOUT_MS)
+  // Step 4: health check — probe the ROOT URL (not the app base path).
+  // Vite's root / returns 302 immediately once the dev server is listening.
+  // We accept 2xx AND 3xx (302 redirect) as "healthy" — it means vite is up.
+  // Pre-bundling happens lazily on the first real request; the proxy handles that
+  // with a 120s timeout so the user's browser waits rather than getting a 504.
+  // Probing the full app URL (/api/preview/${jobId}/app/) causes vite to hang
+  // indefinitely (it queues the request until pre-bundling completes but never
+  // responds within our 3s probe timeout), so we must NOT probe that path here.
+  onLog(makePreviewLog(jobId, 'info', `HEALTH CHECK probing root URL (vite listening check): ${rootUrl}`))
+  let healthy = await waitForHealthy(jobId, rootUrl, onLog, callbacks, HEALTH_CHECK_TIMEOUT_MS)
 
   if (!healthy) {
     onLog(makePreviewLog(jobId, 'info', `REPAIR: health check timed out at 60s — extending to 120s`))
     await callbacks?.onRepairAttempt?.({
       phase: 'healthcheck',
       attempt: 1,
-      reason: 'Health check timed out at 60s',
+      reason: 'Health check timed out at 60s (vite pre-bundling still in progress)',
       strategy: 'extended-timeout-120s',
     })
-    healthy = await waitForHealthy(jobId, url, onLog, callbacks, HEALTH_CHECK_TIMEOUT_EXTENDED_MS)
+    healthy = await waitForHealthy(jobId, rootUrl, onLog, callbacks, HEALTH_CHECK_TIMEOUT_EXTENDED_MS)
   }
 
   if (!healthy) {
     child.kill('SIGKILL')
     freePort(port)
-    const err = new Error(`Preview server at ${url} did not become healthy within 120 seconds (repair attempted)`)
+    emitPreviewStatus('blocked', `Preview health check failed for job ${jobId}`)
+    const err = new Error(`Preview server at ${rootUrl} did not become healthy within 180 seconds`)
     callbacks?.onFailure?.({ phase: 'healthcheck', error: err })
     throw err
+  }
+
+  // Step 5: Warm-up — trigger vite pre-bundling BEFORE emitting preview:ready.
+  //
+  // The health check probes rootUrl (http://localhost:${port}/) which vite answers
+  // immediately with a 302 redirect — no compilation needed. But vite's dependency
+  // pre-bundling only starts on the FIRST request to the actual app base path
+  // (/api/preview/${jobId}/app/). Pre-bundling can take 20-40s on a cold workspace.
+  //
+  // Without this warm-up:
+  //   1. preview:ready is emitted (health check passed on root /)
+  //   2. Test/browser fetches app URL → vite starts pre-bundling
+  //   3. Proxy times out at 60s, destroys the connection
+  //   4. Vite stops pre-bundling (connection gone)
+  //   5. Next request → cycle repeats → perpetual 504
+  //
+  // With this warm-up:
+  //   1. We send a direct request to appUrl (bypassing the proxy, 120s timeout)
+  //   2. Vite pre-bundles and responds (typically 20-40s)
+  //   3. preview:ready is emitted — vite is fully ready
+  //   4. Test/browser fetches app URL → vite responds immediately (cache hit)
+  onLog(makePreviewLog(jobId, 'info', `WARM-UP: triggering vite pre-bundling at ${appUrl} (timeout: 120s)`))
+  const warmupStart = Date.now()
+  try {
+    const warmupStatus = await httpGet(appUrl, 120_000)
+    const warmupSec = ((Date.now() - warmupStart) / 1000).toFixed(1)
+    onLog(makePreviewLog(jobId, 'success', `WARM-UP: vite pre-bundling complete in ${warmupSec}s (HTTP ${warmupStatus})`))
+  } catch (warmupErr) {
+    const warmupSec = ((Date.now() - warmupStart) / 1000).toFixed(1)
+    const msg = warmupErr instanceof Error ? warmupErr.message : String(warmupErr)
+    // Non-fatal: log and proceed. The proxy will handle the first real request.
+    onLog(makePreviewLog(jobId, 'run', `WARM-UP: ${msg} after ${warmupSec}s — proceeding (proxy will handle first request)`))
   }
 
   const startDurationMs = Date.now() - viteStart
@@ -400,7 +595,7 @@ export async function startPreview(
     pid,
     process: child,
     status: 'ready',
-    url,
+    url: appUrl,   // full app URL — used by checkPreviewHealth and ActivePreviewSummary
     startedAt: new Date(),
     installDurationMs,
     startDurationMs,
@@ -417,9 +612,79 @@ export async function startPreview(
     }
   })
 
-  onLog(makePreviewLog(jobId, 'success', `PREVIEW READY at ${url} (install: ${(installDurationMs/1000).toFixed(1)}s, start: ${(startDurationMs/1000).toFixed(1)}s)`))
+  onLog(makePreviewLog(jobId, 'success', `PREVIEW READY at ${appUrl} (install: ${(installDurationMs/1000).toFixed(1)}s, start: ${(startDurationMs/1000).toFixed(1)}s)`))
+  emitPreviewStatus('healthy', `Preview ready at ${appUrl}`, { port, jobId })
 
   return instance
+}
+
+// ─── Post-start health check + auto-restart ───────────────────
+
+/**
+ * Checks if a running preview is still healthy.
+ * If the HTTP health check fails, attempts to restart the Vite process
+ * on the same port without re-running npm install.
+ *
+ * Returns { healthy, restarted }:
+ *   - healthy: true if preview is responding after check (or restart)
+ *   - restarted: true if a restart was attempted
+ *
+ * Safe to call at any time — returns { healthy: false, restarted: false }
+ * if the jobId is unknown or the preview is not in 'ready' state.
+ */
+export async function checkPreviewHealth(
+  jobId: string,
+  onLog?: (log: PreviewLogEntry) => void,
+): Promise<{ healthy: boolean; restarted: boolean }> {
+  const instance = previews.get(jobId)
+  if (!instance) return { healthy: false, restarted: false }
+  if (instance.status !== 'ready') return { healthy: false, restarted: false }
+
+  const log = onLog ?? ((_entry: PreviewLogEntry) => { /* no-op */ })
+
+  // Step 1: HTTP health check
+  try {
+    const status = await httpGet(instance.url)
+    if (status >= 200 && status < 400) {
+      return { healthy: true, restarted: false }
+    }
+    log(makePreviewLog(jobId, 'run', `HEALTH CHECK: HTTP ${status} — preview not healthy`))
+  } catch {
+    log(makePreviewLog(jobId, 'run', `HEALTH CHECK: preview at ${instance.url} not responding`))
+  }
+
+  // Step 2: Attempt restart (kill old process, start new Vite on same port)
+  emitPreviewStatus('recovering', `Preview recovering for job ${jobId}`)
+  log(makePreviewLog(jobId, 'info', `HEALTH RESTART: killing old Vite process (PID: ${instance.pid})`))
+  try {
+    killProcess(instance.process, instance.pid)
+  } catch {
+    // Process may have already exited — continue
+  }
+
+  // Brief pause to let the port free up
+  await new Promise(r => setTimeout(r, 1500))
+
+  log(makePreviewLog(jobId, 'info', `HEALTH RESTART: starting new Vite process on port ${instance.port}`))
+  const newChild = startViteProcess(jobId, instance.workspacePath, instance.port, log)
+  instance.process = newChild
+  instance.pid = newChild.pid ?? 0
+  instance.status = 'starting'
+
+  // Step 3: Wait for the restarted process to become healthy
+  const healthy = await waitForHealthy(jobId, instance.url, log, undefined, HEALTH_CHECK_TIMEOUT_MS)
+
+  if (healthy) {
+    instance.status = 'ready'
+    emitPreviewStatus('healthy', `Preview recovered for job ${jobId}`)
+    log(makePreviewLog(jobId, 'success', `HEALTH RESTART: preview recovered at ${instance.url}`))
+    return { healthy: true, restarted: true }
+  }
+
+  instance.status = 'failed'
+  emitPreviewStatus('blocked', `Preview recovery failed for job ${jobId}`)
+  log(makePreviewLog(jobId, 'error', `HEALTH RESTART: preview failed to recover after restart`))
+  return { healthy: false, restarted: true }
 }
 
 // ─── Preview lifecycle manager ────────────────────────────────
@@ -517,6 +782,7 @@ export function stopPreview(jobId: string): boolean {
   instance.status = 'stopped'
   freePort(instance.port)
   previews.delete(jobId)
+  emitPreviewStatus('stopped', `Preview stopped for job ${jobId}`)
 
   return true
 }

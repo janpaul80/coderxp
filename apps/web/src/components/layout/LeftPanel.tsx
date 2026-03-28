@@ -1,24 +1,24 @@
 import React, { useState, useRef, useEffect } from 'react'
-import { Plus, Zap, LogIn, UserPlus, ChevronDown, LogOut, Settings } from 'lucide-react'
+import { LogIn, UserPlus, ChevronDown, LogOut, Settings, Coins } from 'lucide-react'
 import { useAppStore } from '@/store/appStore'
 import { useAuthStore } from '@/store/authStore'
 import { useChatStore } from '@/store/chatStore'
 import { useAuth } from '@/hooks/useAuth'
 import { StatusIndicator } from '@/components/ui/StatusIndicator'
-import { Button } from '@/components/ui/Button'
 import { ChatThread } from '@/components/chat/ChatThread'
 import { ChatInput } from '@/components/chat/ChatInput'
 import { cn } from '@/lib/utils'
+import { SettingsModal } from '@/components/settings/SettingsModal'
+import { CreditsModal } from '@/components/settings/CreditsModal'
 
 // ─── Auth dropdown ────────────────────────────────────────────
 
-function AuthDropdown() {
+function AuthDropdown({ onOpenSettings }: { onOpenSettings?: () => void }) {
   const user = useAuthStore((s) => s.user)
   const { logout } = useAuth()
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
 
-  // Close on outside click
   useEffect(() => {
     function handleClick(e: MouseEvent) {
       if (ref.current && !ref.current.contains(e.target as Node)) {
@@ -30,7 +30,6 @@ function AuthDropdown() {
   }, [])
 
   if (user) {
-    // Authenticated: avatar + dropdown
     return (
       <div className="relative" ref={ref}>
         <button
@@ -46,10 +45,7 @@ function AuthDropdown() {
               {user.name?.charAt(0).toUpperCase() ?? 'U'}
             </span>
           </div>
-          <span className="text-xs text-text-secondary max-w-[80px] truncate hidden sm:block">
-            {user.name}
-          </span>
-          <ChevronDown className={cn('w-3 h-3 text-text-muted transition-transform duration-150', open && 'rotate-180')} />
+          <ChevronDown className={cn('w-3 h-3 text-white/30 transition-transform duration-150', open && 'rotate-180')} />
         </button>
 
         {open && (
@@ -63,6 +59,7 @@ function AuthDropdown() {
               <p className="text-2xs text-text-muted truncate">{user.email}</p>
             </div>
             <button
+              onClick={() => { onOpenSettings?.(); setOpen(false) }}
               className="w-full flex items-center gap-2 px-3 py-2 text-xs text-text-secondary hover:text-text-primary hover:bg-white/[0.04] transition-all"
             >
               <Settings className="w-3.5 h-3.5 shrink-0" />
@@ -81,21 +78,20 @@ function AuthDropdown() {
     )
   }
 
-  // Unauthenticated: sign in button + dropdown
+  // Unauthenticated
   return (
     <div className="relative" ref={ref}>
       <button
         onClick={() => setOpen(!open)}
         className={cn(
           'flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg',
-          'bg-accent/10 border border-accent/20 hover:bg-accent/15 hover:border-accent/30',
-          'text-xs font-medium text-accent transition-all duration-150',
-          open && 'bg-accent/15 border-accent/30'
+          'bg-white/[0.05] border border-white/[0.08] hover:bg-white/[0.08] hover:border-white/[0.12]',
+          'text-xs font-medium text-white/60 transition-all duration-150',
+          open && 'bg-white/[0.08] border-white/[0.12]'
         )}
       >
         <LogIn className="w-3.5 h-3.5 shrink-0" />
         <span>Sign In</span>
-        <ChevronDown className={cn('w-3 h-3 transition-transform duration-150', open && 'rotate-180')} />
       </button>
 
       {open && (
@@ -108,7 +104,7 @@ function AuthDropdown() {
             onClick={() => setOpen(false)}
             className="w-full flex items-center gap-2.5 px-3 py-2.5 text-xs text-text-secondary hover:text-text-primary hover:bg-white/[0.04] transition-all"
           >
-            <LogIn className="w-3.5 h-3.5 shrink-0 text-accent" />
+            <LogIn className="w-3.5 h-3.5 shrink-0 text-white/40" />
             <div className="text-left">
               <p className="font-medium text-text-primary">Sign In</p>
               <p className="text-2xs text-text-muted">Access your projects</p>
@@ -118,7 +114,7 @@ function AuthDropdown() {
             onClick={() => setOpen(false)}
             className="w-full flex items-center gap-2.5 px-3 py-2.5 text-xs text-text-secondary hover:text-text-primary hover:bg-white/[0.04] transition-all"
           >
-            <UserPlus className="w-3.5 h-3.5 shrink-0 text-accent" />
+            <UserPlus className="w-3.5 h-3.5 shrink-0 text-white/40" />
             <div className="text-left">
               <p className="font-medium text-text-primary">Create Account</p>
               <p className="text-2xs text-text-muted">Free to get started</p>
@@ -136,6 +132,9 @@ export function LeftPanel() {
   const appMode = useAppStore((s) => s.appMode)
   const activeProjectId = useChatStore((s) => s.activeProjectId)
   const projects = useChatStore((s) => s.projects)
+  const user = useAuthStore((s) => s.user)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [creditsOpen, setCreditsOpen] = useState(false)
 
   const activeProject = projects.find((p) => p.id === activeProjectId)
 
@@ -143,49 +142,52 @@ export function LeftPanel() {
     <div className="flex flex-col h-full">
       {/* ── Header ──────────────────────────────────────────── */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-white/[0.06] shrink-0">
-        <div className="flex items-center gap-2.5">
-          {/* Logo */}
-          <div className="flex items-center gap-1.5">
-            <div className="w-6 h-6 rounded-md bg-accent/20 border border-accent/30 flex items-center justify-center">
-              <Zap className="w-3.5 h-3.5 text-accent" />
-            </div>
-            <span className="text-sm font-semibold gradient-text">CodedXP</span>
-          </div>
+        <div className="flex items-center gap-2">
+          {/* Real CoderXP logo */}
+          <img
+            src="/logo-white.png"
+            alt="CoderXP"
+            className="h-6 w-auto select-none"
+            draggable={false}
+          />
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5">
           {/* Status indicator */}
           <StatusIndicator mode={appMode} showLabel={false} />
 
-          {/* New project */}
-          <Button
-            variant="ghost"
-            size="xs"
-            leftIcon={<Plus className="w-3.5 h-3.5" />}
-            onClick={() => {/* TODO: new project */}}
+          {/* Credits button */}
+          <button
+            onClick={() => setCreditsOpen(true)}
+            className={cn(
+              'flex items-center gap-1.5 px-2 py-1.5 rounded-lg text-xs font-medium transition-all',
+              'bg-white/[0.04] border border-white/[0.06] text-white/50',
+              'hover:bg-accent/10 hover:border-accent/20 hover:text-accent-light'
+            )}
           >
-            New
-          </Button>
+            <Coins className="w-3 h-3" />
+            <span className="tabular-nums">{user?.credits ?? 0}</span>
+          </button>
 
           {/* Auth dropdown */}
-          <AuthDropdown />
+          <AuthDropdown onOpenSettings={() => setSettingsOpen(true)} />
         </div>
       </div>
 
       {/* ── Project name bar ────────────────────────────────── */}
       {activeProject && (
-        <div className="px-4 py-2 border-b border-white/[0.04] bg-base-elevated/50 shrink-0">
+        <div className="px-4 py-2 border-b border-white/[0.04] bg-white/[0.015] shrink-0">
           <div className="flex items-center gap-2">
             <div
               className={cn(
                 'w-1.5 h-1.5 rounded-full shrink-0',
-                activeProject.status === 'ready' ? 'bg-success' :
+                activeProject.status === 'ready' ? 'bg-emerald-400' :
                 activeProject.status === 'building' ? 'bg-accent animate-pulse' :
-                activeProject.status === 'error' ? 'bg-error' :
-                'bg-text-muted'
+                activeProject.status === 'error' ? 'bg-red-400' :
+                'bg-white/20'
               )}
             />
-            <span className="text-xs font-medium text-text-secondary truncate">
+            <span className="text-xs font-medium text-white/50 truncate">
               {activeProject.name}
             </span>
           </div>
@@ -203,12 +205,23 @@ export function LeftPanel() {
       </div>
 
       {/* ── Status footer ───────────────────────────────────── */}
-      <div className="shrink-0 px-4 py-2.5 border-t border-white/[0.04] bg-base-elevated/30">
+      <div className="shrink-0 px-4 py-2 border-t border-white/[0.04] bg-white/[0.015]">
         <div className="flex items-center justify-between">
-          <span className="text-2xs text-text-muted">CodedXP</span>
+          <span className="text-2xs text-white/20">CoderXP</span>
           <StatusIndicator mode={appMode} showLabel={true} className="shrink-0" />
         </div>
       </div>
+
+      {/* ── Modals ──────────────────────────────────────────── */}
+      <SettingsModal
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        projectId={activeProjectId}
+      />
+      <CreditsModal
+        open={creditsOpen}
+        onClose={() => setCreditsOpen(false)}
+      />
     </div>
   )
 }

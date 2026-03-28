@@ -1,8 +1,8 @@
-import React, { useState } from 'react'
+import React, { useRef, useState } from 'react'
 import { motion } from 'framer-motion'
+import { GlowCard } from '@/components/ui/spotlight-card'
 
 // ─── Testimonial data ─────────────────────────────────────────
-// Avatars use randomuser.me — real human photos, no sign-up needed.
 const TESTIMONIALS = [
   {
     name: 'Sarah Chen',
@@ -11,6 +11,7 @@ const TESTIMONIALS = [
     text: 'shipped my MVP in 4 hours using @codedxp. it wrote the entire react frontend, prisma schema, and auth flow. i just described what i wanted and approved the plan.',
     time: '2h ago',
     likes: 214,
+    glowColor: 'purple' as const,
   },
   {
     name: 'Marcus Webb',
@@ -19,6 +20,7 @@ const TESTIMONIALS = [
     text: 'the build telemetry in codedxp is genuinely impressive. watching every file get generated in real time feels like pair programming with a very fast senior engineer.',
     time: '1d ago',
     likes: 87,
+    glowColor: 'blue' as const,
   },
   {
     name: 'James Okafor',
@@ -27,6 +29,7 @@ const TESTIMONIALS = [
     text: 'built a saas with stripe checkout, user auth, and a dashboard in one session. live preview meant i could iterate without any local setup. this is the future.',
     time: '5d ago',
     likes: 341,
+    glowColor: 'green' as const,
   },
   {
     name: 'Lena Hoffmann',
@@ -35,6 +38,7 @@ const TESTIMONIALS = [
     text: 'the browser agent is wild. it set up my oauth app on google cloud console autonomously. i just approved the plan and watched it happen. zero manual steps.',
     time: '1w ago',
     likes: 428,
+    glowColor: 'orange' as const,
   },
   {
     name: 'Aisha Patel',
@@ -43,36 +47,56 @@ const TESTIMONIALS = [
     text: 'tried 4 other ai coding tools. codedxp is the only one that actually runs the code and shows you a live preview. everything else just gives you files.',
     time: '2w ago',
     likes: 512,
+    glowColor: 'red' as const,
+  },
+  {
+    name: 'Dev Kapoor',
+    handle: '@devkapoor_io',
+    avatar: 'https://randomuser.me/api/portraits/men/52.jpg',
+    text: 'codedxp generated a full prisma schema, seeded the db, and wired up the api routes in one build. i just reviewed the plan and hit approve. insane productivity.',
+    time: '3d ago',
+    likes: 193,
+    glowColor: 'purple' as const,
+  },
+  {
+    name: 'Mia Torres',
+    handle: '@mia_builds',
+    avatar: 'https://randomuser.me/api/portraits/women/68.jpg',
+    text: 'non-technical founder here. i described my app idea in plain english and codedxp built a working prototype with auth and a dashboard. showed it to investors the same day.',
+    time: '4d ago',
+    likes: 677,
+    glowColor: 'blue' as const,
   },
 ]
 
-// ─── Card hover colors ────────────────────────────────────────
-const HOVER_COLORS = [
-  'rgba(124,106,247,0.08)',  // purple
-  'rgba(59,130,246,0.08)',   // blue
-  'rgba(16,185,129,0.08)',   // emerald
-  'rgba(245,158,11,0.08)',   // amber
-  'rgba(239,68,68,0.08)',    // red
-]
+// ─── Marquee keyframe injected once ──────────────────────────
+const MARQUEE_STYLE = `
+@keyframes marquee-ltr {
+  from { transform: translateX(-50%); }
+  to   { transform: translateX(0%);   }
+}
+@keyframes marquee-rtl {
+  from { transform: translateX(0%);   }
+  to   { transform: translateX(-50%); }
+}
+.marquee-track {
+  display: flex;
+  width: max-content;
+  animation: marquee-ltr 40s linear infinite;
+}
+.marquee-track:hover {
+  animation-play-state: paused;
+}
+`
 
-function TestimonialCard({ item, index }: { item: typeof TESTIMONIALS[0]; index: number }) {
-  const [hovered, setHovered] = useState(false)
-  const hoverColor = HOVER_COLORS[index % HOVER_COLORS.length]
-
+// ─── Single testimonial card ──────────────────────────────────
+function TestimonialCard({ item }: { item: typeof TESTIMONIALS[0] }) {
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 24 }}
-      whileInView={{ opacity: 1, y: 0 }}
-      viewport={{ once: true, margin: '-40px' }}
-      transition={{ duration: 0.45, delay: index * 0.1 }}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      className="relative p-5 rounded-2xl cursor-default select-none transition-all duration-300"
-      style={{
-        background: hovered ? hoverColor : 'rgba(255,255,255,0.03)',
-        border: `1px solid ${hovered ? 'rgba(255,255,255,0.12)' : 'rgba(255,255,255,0.07)'}`,
-        transform: hovered ? 'translateY(-3px)' : 'translateY(0)',
-      }}
+    <GlowCard
+      customSize
+      glowColor={item.glowColor}
+      width={320}
+      className="flex-shrink-0 p-5 flex flex-col gap-0 cursor-default select-none"
     >
       {/* Header */}
       <div className="flex items-center justify-between mb-3">
@@ -95,10 +119,10 @@ function TestimonialCard({ item, index }: { item: typeof TESTIMONIALS[0]; index:
       </div>
 
       {/* Text */}
-      <p className="text-sm text-white/65 leading-relaxed mb-4">{item.text}</p>
+      <p className="text-sm text-white/65 leading-relaxed mb-4 flex-1">{item.text}</p>
 
       {/* Footer */}
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between mt-auto">
         <span className="text-xs text-white/25">{item.time}</span>
         <div className="flex items-center gap-1 text-white/30">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -107,17 +131,20 @@ function TestimonialCard({ item, index }: { item: typeof TESTIMONIALS[0]; index:
           <span className="text-xs">{item.likes}</span>
         </div>
       </div>
-    </motion.div>
+    </GlowCard>
   )
 }
 
 // ─── Section ──────────────────────────────────────────────────
 export function TestimonialsSection() {
+  // Duplicate for seamless infinite loop
+  const doubled = [...TESTIMONIALS, ...TESTIMONIALS]
+
   return (
-    <section
-      className="py-28"
-      style={{ backgroundColor: '#000000' }}
-    >
+    <section className="py-28 overflow-hidden" style={{ backgroundColor: '#000000' }}>
+      <style dangerouslySetInnerHTML={{ __html: MARQUEE_STYLE }} />
+
+      {/* Header */}
       <div className="max-w-6xl mx-auto px-6 mb-14">
         <motion.div
           initial={{ opacity: 0, y: 20 }}
@@ -138,16 +165,25 @@ export function TestimonialsSection() {
         </motion.div>
       </div>
 
-      {/* 5 cards — top row of 3, bottom row of 2 centered */}
-      <div className="max-w-6xl mx-auto px-6">
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
-          {TESTIMONIALS.slice(0, 3).map((item, i) => (
-            <TestimonialCard key={item.handle} item={item} index={i} />
-          ))}
-        </div>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 max-w-4xl mx-auto">
-          {TESTIMONIALS.slice(3, 5).map((item, i) => (
-            <TestimonialCard key={item.handle} item={item} index={i + 3} />
+      {/* Carousel — full-bleed, left-to-right infinite scroll */}
+      <div className="relative w-full">
+        {/* Left fade mask — narrower on mobile so cards aren't obscured */}
+        <div
+          className="absolute left-0 top-0 bottom-0 w-8 sm:w-20 md:w-32 z-10 pointer-events-none"
+          style={{ background: 'linear-gradient(to right, #000000 0%, transparent 100%)' }}
+        />
+        {/* Right fade mask — narrower on mobile so cards aren't obscured */}
+        <div
+          className="absolute right-0 top-0 bottom-0 w-8 sm:w-20 md:w-32 z-10 pointer-events-none"
+          style={{ background: 'linear-gradient(to left, #000000 0%, transparent 100%)' }}
+        />
+
+        {/* Scrolling track */}
+        <div className="marquee-track gap-5 px-5">
+          {doubled.map((item, i) => (
+            <div key={`${item.handle}-${i}`} className="px-2">
+              <TestimonialCard item={item} />
+            </div>
           ))}
         </div>
       </div>

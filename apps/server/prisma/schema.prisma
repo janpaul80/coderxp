@@ -10,6 +10,10 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// ─── ProjectMemory ────────────────────────────────────────────
+// repoSnapshot: structural snapshot of the generated workspace (Sprint 8)
+// Stored after every successful build; injected into planning/generation/repair/continuation.
+
 // ─── User ─────────────────────────────────────────────────────
 
 model User {
@@ -28,6 +32,7 @@ model User {
   credentialRequests CredentialRequest[]
   browserSessions    BrowserSession[]
   builderSessions    BuilderSession[]
+  apiKeys            ApiKey[]
 
   @@map("users")
 }
@@ -288,6 +293,18 @@ model ProjectMemory {
   // ── Supplemental summary (AI-distilled or rule-based) ────
   summary   String? @db.Text
 
+  // ── Explicit project-level rules ──────────────────────────
+  // Override user-level rules for this project.
+  // Shape: UserRule[] — { id, content, category, active, createdAt }
+  projectRules Json @default("[]")
+
+  // ── Repo snapshot (Sprint 8) ──────────────────────────────
+  // Structural snapshot of the generated workspace captured after every
+  // successful build. Injected into planning, generation, repair, and
+  // continuation so the AI knows what already exists.
+  // Shape: WorkspaceSnapshot — { fileTree, components, routes, apiEndpoints, prismaModels, dependencies, ... }
+  repoSnapshot Json?
+
   version   Int      @default(1)
   updatedAt DateTime @updatedAt
   createdAt DateTime @default(now())
@@ -316,6 +333,11 @@ model UserMemory {
 
   // ── Supplemental summary (AI-distilled or rule-based) ────
   summary   String? @db.Text
+
+  // ── Explicit user-defined rules ───────────────────────────
+  // User writes these manually; always injected into AI system prompt.
+  // Shape: UserRule[] — { id, content, category, active, createdAt }
+  userRules Json    @default("[]")
 
   version   Int      @default(1)
   updatedAt DateTime @updatedAt
@@ -520,4 +542,23 @@ enum FileType {
   code
   audio
   other
+}
+
+// ─── API Key ───────────────────────────────────────────────────
+// CoderXP public API keys (cxp_ prefix). Hash stored, never raw key.
+
+model ApiKey {
+  id         String    @id @default(cuid())
+  userId     String
+  name       String    @default("Default")
+  keyPrefix  String    // First 8 chars of the key for identification (e.g. "cxp_ab12")
+  keyHash    String    @unique // SHA-256 hash of the full key
+  lastUsedAt DateTime?
+  revokedAt  DateTime?
+  expiresAt  DateTime?
+  createdAt  DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("api_keys")
 }

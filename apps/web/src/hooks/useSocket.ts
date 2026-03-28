@@ -1,9 +1,10 @@
+
 import { useEffect, useRef, useCallback } from 'react'
 import { connectSocket, disconnectSocket, getSocket } from '@/lib/socket'
 import { useAuthStore } from '@/store/authStore'
 import { useAppStore } from '@/store/appStore'
 import { useChatStore } from '@/store/chatStore'
-import type { Message, Plan, Job, JobLog, CredentialRequest } from '@/types'
+import type { Message, Plan, Job, JobLog, CredentialRequest, ErrorAnalysis, AgentStatusPayload, FileChangePayload, AgentProgressSnapshot } from '@/types'
 
 // ─── Log level normalizer ─────────────────────────────────────
 // Server sends BuildLogEntry { level: 'info'|'warn'|'error'|'success', step, message }
@@ -45,11 +46,20 @@ export function useSocket() {
     setActiveJob,
     setBuildSummary,
     setPendingCredential,
+    setPendingContinuationSuggestion,
+    setPendingRepairSuggestion,
     setPendingBrowserApproval,
     setActiveBrowserSession,
     addBrowserAction,
     updateBrowserAction,
     clearBrowserSession,
+    appendStreamingFileToken,
+    clearStreamingFile,
+    pushAgentStatus,
+    pushFileChange,
+    setAgentSnapshot,
+    setTestResults,
+    setSecurityAudit,
   } = useAppStore()
 
   const {
@@ -142,31 +152,73 @@ export function useSocket() {
       }
     })
 
-    s.on('job:complete', ({ jobId, previewUrl, url }: { jobId: string; previewUrl?: string; url?: string; summary?: Record<string, unknown> }) => {
-      const preview = previewUrl ?? url ?? ''
-      // Build summary from active job telemetry
-      const activeJob = useAppStore.getState().activeJob
-      if (activeJob) {
-        const startedAt = activeJob.startedAt ? new Date(activeJob.startedAt).getTime() : 0
-        const completedAt = Date.now()
-        const buildMeta = (activeJob as unknown as { buildMeta?: Record<string, unknown> }).buildMeta ?? {}
-        const techStack: string[] = Array.isArray(buildMeta.techStack)
-          ? (buildMeta.techStack as string[])
-          : []
-        const keyFiles: string[] = Array.isArray((activeJob as unknown as { generatedKeyFiles?: string[] }).generatedKeyFiles)
-          ? ((activeJob as unknown as { generatedKeyFiles?: string[] }).generatedKeyFiles as string[])
-          : []
-        setBuildSummary({
-          jobId,
-          projectId: activeJob.projectId,
-          fileCount: (activeJob as unknown as { generatedFileCount?: number }).generatedFileCount ?? 0,
-          totalBytes: (activeJob as unknown as { generatedTotalBytes?: number }).generatedTotalBytes ?? 0,
-          durationMs: startedAt > 0 ? completedAt - startedAt : 0,
-          techStack,
-          keyFiles,
-          builtAt: new Date().toISOString(),
-        })
+    // ── Continuation / repair suggestions ────────────────
+    s.on('job:continuation_suggested', ({ jobId, request }: { jobId: string; request: string; canContinue: boolean }) => {
+      setPendingContinuationSuggestion({ jobId, request })
+      const msg: Message = {
+        id: `continuation-${jobId}-${Date.now()}`,
+        chatId: '',
+        role: 'assistant',
+        type: 'continuation_suggested',
+        content: 'I can extend your existing build with the new pages/features you requested.',
+        metadata: { jobId, continuationSuggestion: { jobId, request } },
+        createdAt: new Date().toISOString(),
       }
+      addMessage(msg)
+    })
+
+    s.on('job:repair_suggested', ({ jobId, reason, complaint, canAutoRepair }: {
+      jobId: string; reason: string; complaint?: string; canAutoRepair: boolean
+    }) => {
+      setPendingRepairSuggestion({ jobId, reason, complaint, canAutoRepair })
+      const msg: Message = {
+        id: `repair-suggested-${jobId}-${Date.now()}`,
+        chatId: '',
+        role: 'assistant',
+        type: 'repair_suggested',
+        content: canAutoRepair
+          ? 'I can automatically repair the issue in your live build without a full rebuild.'
+          : 'I can re-queue this build for repair.',
+        metadata: { jobId, repairSuggestion: { jobId, complaint: complaint ?? reason, canAutoRepair } },
+        createdAt: new Date().toISOString(),
+      }
+      addMessage(msg)
+    })
+
+    s.on('job:continuation_complete', ({ previewUrl }: { jobId: string; previewUrl?: string }) => {
+      setPendingContinuationSuggestion(null)
+      if (previewUrl) transitionToPreview(previewUrl)
+    })
+
+    s.on('job:complete', ({
+      jobId, previewUrl, url,
+      fileCount: payloadFileCount,
+      totalBytes: payloadTotalBytes,
+      techStack: payloadTechStack,
+      keyFiles: payloadKeyFiles,
+    }) => {
+      const preview = previewUrl ?? url ?? ''
+      // Use event payload values (sent by server at job:complete time).
+      // Fall back to activeJob fields only for projectId / durationMs calculation.
+      const activeJob = useAppStore.getState().activeJob
+      const startedAt = activeJob?.startedAt ? new Date(activeJob.startedAt).getTime() : 0
+      const completedAt = Date.now()
+      const fileCount = payloadFileCount ?? 0
+      const totalBytes = payloadTotalBytes ?? 0
+      const techStack: string[] = Array.isArray(payloadTechStack) ? payloadTechStack : []
+      const keyFiles: string[] = Array.isArray(payloadKeyFiles) ? payloadKeyFiles : []
+      setBuildSummary({
+        jobId,
+        projectId: activeJob?.projectId ?? '',
+        fileCount,
+        totalBytes,
+        durationMs: startedAt > 0 ? completedAt - startedAt : 0,
+        techStack,
+        keyFiles,
+        builtAt: new Date().toISOString(),
+      })
+      // Clear any pending continuation suggestion — the job that was suggested is now complete
+      setPendingContinuationSuggestion(null)
       transitionToPreview(preview)
       const completeMessage: Message = {
         id: `complete-${jobId}`,
@@ -185,6 +237,52 @@ export function useSocket() {
         message: error.message,
         failureCategory: error.category,
       })
+    })
+
+    // ── Streaming file tokens ─────────────────────────────
+    s.on('job:file_token', ({ path, delta }: { jobId: string; path: string; delta: string }) => {
+      appendStreamingFileToken(path, delta)
+    })
+
+    s.on('job:targeted_repair', ({ jobId, filesToRepair, repairSummary, previewUrl }: {
+      jobId: string; filesToRepair: string[]; repairSummary: string; previewUrl?: string
+    }) => {
+      clearStreamingFile()
+      if (previewUrl) {
+        transitionToPreview(previewUrl)
+      }
+      const repairMsg: Message = {
+        id: `repair-${jobId}`,
+        chatId: '',
+        role: 'assistant',
+        type: 'repair_complete',
+        content: `✅ Repair complete: ${repairSummary} (${filesToRepair.length} file${filesToRepair.length !== 1 ? 's' : ''} updated)`,
+        createdAt: new Date().toISOString(),
+      }
+      addMessage(repairMsg)
+    })
+
+    // ── S9: AI-Native Debugger — error analysis ───────────
+    s.on('job:error_analysis', ({ jobId, errorAnalysis, attempt, autoRepairTriggered }: {
+      jobId: string
+      errorAnalysis: ErrorAnalysis
+      attempt: number
+      autoRepairTriggered: boolean
+    }) => {
+      const analysisMsg: Message = {
+        id: `error-analysis-${jobId}-${attempt}-${Date.now()}`,
+        chatId: '',
+        role: 'assistant',
+        type: 'error_analysis',
+        content: `Build error detected (attempt ${attempt}): ${errorAnalysis.rootCause}`,
+        metadata: {
+          jobId,
+          errorAnalysis,
+          autoRepairAttempt: attempt,
+        },
+        createdAt: new Date().toISOString(),
+      }
+      addMessage(analysisMsg)
     })
 
     // ── Repair events ─────────────────────────────────────
@@ -313,6 +411,46 @@ export function useSocket() {
       }
     })
 
+    // ── Multi-agent system events ────────────────────────
+    s.on('agent:status', (payload: AgentStatusPayload) => {
+      pushAgentStatus(payload)
+    })
+
+    s.on('agent:fileChange', (payload: FileChangePayload) => {
+      pushFileChange(payload)
+    })
+
+    s.on('agent:snapshot', (snapshot: AgentProgressSnapshot) => {
+      setAgentSnapshot(snapshot)
+    })
+
+    // ── Test results & security audit (Sprint 19) ────────
+    s.on('job:test_results', (data: {
+      jobId: string; numTests: number; numPassed: number; numFailed: number
+      success: boolean; coverage: any; failures: any[]
+    }) => {
+      setTestResults({
+        numTests: data.numTests,
+        numPassed: data.numPassed,
+        numFailed: data.numFailed,
+        success: data.success,
+        coverage: data.coverage,
+        failures: data.failures,
+      })
+    })
+
+    s.on('job:security_audit', (data: {
+      jobId: string; securityScore: number; counts: Record<string, number>
+      findings: any[]; vulnerabilities: any[]
+    }) => {
+      setSecurityAudit({
+        securityScore: data.securityScore,
+        counts: data.counts,
+        findings: data.findings,
+        vulnerabilities: data.vulnerabilities,
+      })
+    })
+
     // ── Error ─────────────────────────────────────────────
     s.on('error', ({ message }: { message: string; code?: string }) => {
       console.error('[Socket Error]', message)
@@ -343,11 +481,20 @@ export function useSocket() {
     setActiveJob,
     setBuildSummary,
     setPendingCredential,
+    setPendingContinuationSuggestion,
+    setPendingRepairSuggestion,
     setPendingBrowserApproval,
     setActiveBrowserSession,
     addBrowserAction,
     updateBrowserAction,
     clearBrowserSession,
+    appendStreamingFileToken,
+    clearStreamingFile,
+    pushAgentStatus,
+    pushFileChange,
+    setAgentSnapshot,
+    setTestResults,
+    setSecurityAudit,
   ])
 
   useEffect(() => {
@@ -394,6 +541,26 @@ export function useSocket() {
     terminateBrowserSession: (sessionId: string) => {
       getSocket().emit('browser:terminate', { sessionId })
       clearBrowserSession()
+    },
+    // ── Continuation actions ──────────────────────────────
+    approveContinuation: (existingJobId: string, request: string) => {
+      getSocket().emit('job:continuation_approve', { existingJobId, request })
+      setPendingContinuationSuggestion(null)
+    },
+    dismissContinuation: () => {
+      setPendingContinuationSuggestion(null)
+    },
+    // ── Repair actions ────────────────────────────────────
+    approveRepair: (jobId: string, complaint: string, canAutoRepair: boolean) => {
+      if (canAutoRepair) {
+        getSocket().emit('job:targeted_repair', { jobId, complaint })
+      } else {
+        getSocket().emit('job:repair', { jobId })
+      }
+      setPendingRepairSuggestion(null)
+    },
+    dismissRepair: () => {
+      setPendingRepairSuggestion(null)
     },
   }
 }

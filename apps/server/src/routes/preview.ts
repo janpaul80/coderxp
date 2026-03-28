@@ -8,7 +8,7 @@
  * POST /api/preview/test/inject-failure-job — DEV ONLY: inject a job that will fail
  */
 
-import { Router, Response } from 'express'
+import { Router, Request, Response } from 'express'
 import { requireAuth, AuthRequest } from '../middleware/auth'
 import { prisma } from '../lib/prisma'
 import { Prisma } from '@prisma/client'
@@ -16,9 +16,10 @@ import {
   getPreviewInstance,
   stopPreview,
   getActivePreviewsSummary,
+  checkPreviewHealth,
 } from '../services/previewManager'
 import { builderQueue } from '../jobs/builderQueue'
-import { selectWorker } from '../services/workerRouter'
+import { selectWorker, getWorkerBaseUrl } from '../services/workerRouter'
 import { io } from '../index'
 import { getUserSocketIds } from '../socket/events'
 import http from 'http'
@@ -228,6 +229,55 @@ previewRouter.post('/test/inject-credential-request', requireAuth, async (req: A
   }
 })
 
+// ─── POST /api/preview/test/inject-error-analysis ────────────
+// S9 E2E test endpoint — emits job:error_analysis to the authenticated user's
+// socket(s) with a synthetic ErrorAnalysis payload.
+// Auth-gated. Works in production (read-only socket emit, no DB writes).
+// Used to verify the socket event path and ErrorAnalysisCard rendering
+// without triggering a real build.
+
+previewRouter.post('/test/inject-error-analysis', requireAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const { jobId, errorAnalysis, attempt } = req.body as {
+      jobId?: string
+      errorAnalysis?: Record<string, unknown>
+      attempt?: number
+    }
+
+    if (!jobId || !errorAnalysis) {
+      return res.status(400).json({ error: 'jobId and errorAnalysis are required' })
+    }
+
+    // Verify job ownership
+    const job = await getOwnedJob(jobId, req.userId!)
+    if (!job) {
+      return res.status(404).json({ error: 'Job not found' })
+    }
+
+    const payload = {
+      jobId,
+      attempt: attempt ?? 1,
+      errorAnalysis,
+    }
+
+    const socketIds = getUserSocketIds(req.userId!)
+    socketIds.forEach((sid) => {
+      io.to(sid).emit('job:error_analysis', payload)
+    })
+
+    return res.status(200).json({
+      ok: true,
+      jobId,
+      attempt: payload.attempt,
+      socketCount: socketIds.length,
+      message: `job:error_analysis emitted to ${socketIds.length} socket(s)`,
+    })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Failed to inject error analysis'
+    return res.status(500).json({ error: message })
+  }
+})
+
 // ─── GET /api/preview/test/credential-request/:requestId ─────
 // DEV/TEST ONLY — returns the DB record for a credential request.
 // NOTE: No values field — values are never persisted.
@@ -364,6 +414,8 @@ previewRouter.post('/:jobId/stop', requireAuth, async (req: AuthRequest, res: Re
 })
 
 // ─── GET /api/preview/:jobId/health ──────────────────────────
+// Query params:
+//   ?restart=true  — if unhealthy, attempt Vite restart via checkPreviewHealth()
 
 previewRouter.get('/:jobId/health', requireAuth, async (req: AuthRequest, res: Response) => {
   try {
@@ -372,11 +424,14 @@ previewRouter.get('/:jobId/health', requireAuth, async (req: AuthRequest, res: R
       return res.status(404).json({ error: 'Job not found' })
     }
 
+    const allowRestart = req.query.restart === 'true'
+
     // Failed jobs: return failure info immediately without probing
     if (job.status === 'failed') {
       return res.json({
         healthy: false,
         statusCode: 0,
+        restarted: false,
         previewUrl: job.previewUrl ?? null,
         dbStatus: job.status,
         previewStatus: job.previewStatus ?? null,
@@ -391,6 +446,7 @@ previewRouter.get('/:jobId/health', requireAuth, async (req: AuthRequest, res: R
       return res.json({
         healthy: false,
         statusCode: 0,
+        restarted: false,
         previewUrl: job.previewUrl ?? null,
         dbStatus: job.status,
         previewStatus: 'stopped',
@@ -406,6 +462,7 @@ previewRouter.get('/:jobId/health', requireAuth, async (req: AuthRequest, res: R
       return res.json({
         healthy: false,
         statusCode: 0,
+        restarted: false,
         previewUrl: null,
         dbStatus: job.status,
         previewStatus: job.previewStatus ?? null,
@@ -416,9 +473,46 @@ previewRouter.get('/:jobId/health', requireAuth, async (req: AuthRequest, res: R
       })
     }
 
-    // Probe the preview URL
+    // Probe via internal localhost URL (from in-memory instance) — avoids HTTPS round-trip
+    const instance = getPreviewInstance(req.params.jobId)
+    const probeUrl = instance?.url ?? null
+
+    if (!probeUrl) {
+      return res.json({
+        healthy: false,
+        statusCode: 0,
+        restarted: false,
+        previewUrl,
+        dbStatus: job.status,
+        previewStatus: job.previewStatus ?? null,
+        failureCategory: null,
+        error: null,
+        liveStatus: null,
+        reason: 'Preview process not running on this server instance',
+      })
+    }
+
+    // If restart=true, delegate to checkPreviewHealth() which handles probe + restart
+    if (allowRestart) {
+      const { healthy, restarted } = await checkPreviewHealth(req.params.jobId)
+      const updatedInstance = getPreviewInstance(req.params.jobId)
+      return res.json({
+        healthy,
+        statusCode: healthy ? 200 : 0,
+        restarted,
+        previewUrl,
+        dbStatus: job.status,
+        previewStatus: job.previewStatus ?? null,
+        failureCategory: job.failureCategory ?? null,
+        error: job.error ?? null,
+        liveStatus: updatedInstance?.status ?? null,
+        reason: healthy ? null : 'Preview unhealthy after restart attempt',
+      })
+    }
+
+    // Default: passive probe only (no restart)
     const statusCode = await new Promise<number>((resolve) => {
-      const req2 = http.get(previewUrl, (r) => {
+      const req2 = http.get(probeUrl, (r) => {
         r.resume()
         resolve(r.statusCode ?? 0)
       })
@@ -427,11 +521,11 @@ previewRouter.get('/:jobId/health', requireAuth, async (req: AuthRequest, res: R
     })
 
     const healthy = statusCode >= 200 && statusCode < 400
-    const instance = getPreviewInstance(req.params.jobId)
 
     return res.json({
       healthy,
       statusCode,
+      restarted: false,
       previewUrl,
       dbStatus: job.status,
       previewStatus: job.previewStatus ?? null,
@@ -483,3 +577,165 @@ previewRouter.get('/:jobId/logs', requireAuth, async (req: AuthRequest, res: Res
     return res.status(500).json({ error: message })
   }
 })
+
+// ─── GET /api/preview/:jobId/app  (root)
+// ─── GET /api/preview/:jobId/app/* (all paths)
+// Public — no auth required (jobId provides obscurity; iframe needs direct access)
+// Proxies to the local Vite dev server running on http://localhost:PORT
+
+// Hop-by-hop headers must NOT be forwarded by proxies (RFC 7230 §6.1).
+// Forwarding them (especially `connection`, `transfer-encoding`, `upgrade`)
+// causes Node's http module to misframe the response and drop the connection,
+// which manifests as `fetch failed` on the client.
+const HOP_BY_HOP = new Set([
+  'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
+  'te', 'trailers', 'transfer-encoding', 'upgrade',
+])
+
+function stripHopByHop(headers: Record<string, string | string[] | undefined>): Record<string, string | string[] | undefined> {
+  const out: Record<string, string | string[] | undefined> = {}
+  for (const [k, v] of Object.entries(headers)) {
+    if (!HOP_BY_HOP.has(k.toLowerCase())) out[k] = v
+  }
+  return out
+}
+
+function proxyToUrl(req: Request, res: Response, targetUrl: string): void {
+  const forwardHeaders = {
+    ...stripHopByHop(req.headers as Record<string, string | string[] | undefined>),
+    'x-forwarded-for': req.ip ?? '',
+    'x-forwarded-proto': 'https',
+    // Explicit connection:close so vite doesn't try to keep-alive the proxy socket
+    'connection': 'close',
+  }
+
+  const proxyReq = http.request(
+    targetUrl,
+    {
+      method: req.method,
+      headers: forwardHeaders,
+    },
+    (proxyRes) => {
+      // Strip hop-by-hop from response headers too before forwarding to client
+      const responseHeaders = stripHopByHop(proxyRes.headers as Record<string, string | string[] | undefined>)
+      res.writeHead(proxyRes.statusCode ?? 200, responseHeaders)
+      proxyRes.pipe(res, { end: true })
+    }
+  )
+
+  proxyReq.on('error', (err) => {
+    if (!res.headersSent) {
+      res.status(502).send('Preview proxy error: ' + err.message)
+    }
+  })
+
+  // 60s timeout: vite's first request triggers full compilation which can take 20-40s
+  // on a cold workspace. The health check in startPreview() only probes the root path
+  // (fast redirect), so the first real page request may still need compilation time.
+  proxyReq.setTimeout(60000, () => {
+    proxyReq.destroy()
+    if (!res.headersSent) {
+      res.status(504).send('Preview proxy timeout')
+    }
+  })
+
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    req.pipe(proxyReq, { end: true })
+  } else {
+    proxyReq.end()
+  }
+}
+
+function handlePreviewProxy(req: Request, res: Response): void {
+  const { jobId } = req.params
+  const subPath = (req.params as Record<string, string>)[0] ?? ''
+  const queryString = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : ''
+
+  const instance = getPreviewInstance(jobId)
+
+  // ── Local instance path ───────────────────────────────────
+  if (instance) {
+    if (instance.status !== 'ready') {
+      res.status(503).send(
+        '<html><head><meta http-equiv="refresh" content="3"></head>' +
+        '<body style="background:#09090b;color:#a1a1aa;font-family:monospace;padding:2rem">' +
+        '<h2 style="color:#fbbf24">Preview starting...</h2>' +
+        '<p>Status: ' + instance.status + '</p>' +
+        '<p>This page will refresh automatically.</p>' +
+        '</body></html>'
+      )
+      return
+    }
+
+    const port = instance.port
+    // FIX: Must send the full base path to vite, not just '/'.
+    // Vite is started with --base /api/preview/{jobId}/app/ so it redirects
+    // any request to '/' back to the base path → infinite 302 redirect loop.
+    // Sending the full path lets vite serve index.html directly.
+    const targetPath = `/api/preview/${jobId}/app/${subPath}`
+    const targetUrl = `http://localhost:${port}${targetPath}${queryString}`
+    // Override host header for local proxy
+    req.headers.host = `localhost:${port}`
+    proxyToUrl(req, res, targetUrl)
+    return
+  }
+
+  // ── Cross-server fallback: look up job's workerName and proxy ──
+  // This handles the case where the preview is running on a different server.
+  // We do a non-blocking DB lookup and proxy to the remote worker's preview endpoint.
+  prisma.job.findUnique({
+    where: { id: jobId },
+    select: { workerName: true, previewUrl: true, previewStatus: true },
+  }).then((job) => {
+    if (!job) {
+      res.status(503).send(
+        '<html><body style="background:#09090b;color:#a1a1aa;font-family:monospace;padding:2rem">' +
+        '<h2 style="color:#f87171">Preview not found</h2>' +
+        '<p>The preview for this job is not running. It may have been stopped or expired.</p>' +
+        '</body></html>'
+      )
+      return
+    }
+
+    if (job.previewStatus === 'stopped') {
+      res.status(503).send(
+        '<html><body style="background:#09090b;color:#a1a1aa;font-family:monospace;padding:2rem">' +
+        '<h2 style="color:#f87171">Preview stopped</h2>' +
+        '<p>This preview has been stopped.</p>' +
+        '</body></html>'
+      )
+      return
+    }
+
+    const workerBaseUrl = job.workerName ? getWorkerBaseUrl(job.workerName) : null
+
+    if (!workerBaseUrl) {
+      // No remote worker URL — preview is not accessible
+      res.status(503).send(
+        '<html><body style="background:#09090b;color:#a1a1aa;font-family:monospace;padding:2rem">' +
+        '<h2 style="color:#f87171">Preview not available</h2>' +
+        '<p>The preview process is not running on this server. ' +
+        (job.workerName && job.workerName !== 'local'
+          ? `Worker "${job.workerName}" is not reachable.`
+          : 'No remote worker configured.') +
+        '</p>' +
+        '</body></html>'
+      )
+      return
+    }
+
+    // Proxy to the remote worker's preview endpoint
+    const targetPath = `/api/preview/${jobId}/app` + (subPath ? `/${subPath}` : '')
+    const targetUrl = `${workerBaseUrl}${targetPath}${queryString}`
+    console.log(`[Preview] Cross-server proxy: job ${jobId} → ${workerBaseUrl} (worker: ${job.workerName})`)
+    proxyToUrl(req, res, targetUrl)
+  }).catch((err) => {
+    console.error('[Preview] Cross-server proxy DB lookup failed:', err)
+    if (!res.headersSent) {
+      res.status(500).send('Preview proxy error: DB lookup failed')
+    }
+  })
+}
+
+previewRouter.get('/:jobId/app', handlePreviewProxy)
+previewRouter.get('/:jobId/app/*', handlePreviewProxy)

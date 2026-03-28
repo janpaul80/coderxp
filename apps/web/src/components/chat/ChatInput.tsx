@@ -1,5 +1,5 @@
 import React, { useRef, useState, useCallback, useEffect } from 'react'
-import { Send, Paperclip, Mic, MicOff, X, FileText, FileCode, FileImage, File } from 'lucide-react'
+import { Send, Paperclip, Mic, MicOff, X, FileText, FileCode, FileImage, File, Plug, Shield } from 'lucide-react'
 import { useChatStore } from '@/store/chatStore'
 import { useAppStore } from '@/store/appStore'
 import { useSocket } from '@/hooks/useSocket'
@@ -8,6 +8,8 @@ import { Spinner } from '@/components/ui/Spinner'
 import { mockEngine } from '@/lib/mockEngine'
 import { getSocket } from '@/lib/socket'
 import { projectsApi, chatsApi } from '@/lib/api'
+import { ApiProviderModal } from '@/components/settings/ApiProviderModal'
+import { McpMarketplaceModal } from '@/components/settings/McpMarketplaceModal'
 import type { UploadedFile, UploadedFileType, Project, Chat } from '@/types'
 
 // ─── Helpers ─────────────────────────────────────────────────
@@ -120,6 +122,8 @@ export function ChatInput() {
 
   const [isRecording, setIsRecording] = useState(false)
   const [mediaRecorder, setMediaRecorder] = useState<MediaRecorder | null>(null)
+  const [apiModalOpen, setApiModalOpen] = useState(false)
+  const [mcpModalOpen, setMcpModalOpen] = useState(false)
 
   // Auto-resize textarea — grows with content up to 300px
   useEffect(() => {
@@ -182,26 +186,24 @@ export function ChatInput() {
       }
     }
 
+    // Always show user message instantly (optimistic) — server echo is deduplicated by id
+    const optimisticId = generateId()
+    addMessage({
+      id: optimisticId,
+      chatId,
+      role: 'user',
+      type: 'text',
+      content: content || `[${pendingFiles.length} file${pendingFiles.length > 1 ? 's' : ''} attached]`,
+      createdAt: new Date().toISOString(),
+      metadata: fileIds.length > 0 ? { fileIds } : undefined,
+    })
+
     setAssistantTyping(true)
 
-    // Use mock engine when backend is not connected (demo / offline mode).
-    // In connected mode the server echoes the user message back via chat:message,
-    // so we do NOT add it optimistically here — that would create a duplicate.
     const isSocketConnected = getSocket().connected
     if (!isSocketConnected) {
-      // Offline / demo mode: add optimistically since there's no server echo
-      addMessage({
-        id: generateId(),
-        chatId,
-        role: 'user',
-        type: 'text',
-        content: content || `[${pendingFiles.length} file${pendingFiles.length > 1 ? 's' : ''} attached]`,
-        createdAt: new Date().toISOString(),
-        metadata: fileIds.length > 0 ? { fileIds } : undefined,
-      })
       mockEngine.handleMessage(content, chatId)
     } else {
-      // Connected mode: server will echo the user message back via chat:message
       sendMessage(chatId, content, fileIds.length > 0 ? fileIds : undefined)
     }
 
@@ -310,6 +312,32 @@ export function ChatInput() {
 
   return (
     <div className="px-4 py-3">
+      {/* ── API / MCP toolbar ────────────────────────────────── */}
+      <div className="flex items-center gap-1.5 mb-2">
+        <button
+          onClick={() => setApiModalOpen(true)}
+          className={cn(
+            'flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-2xs font-medium transition-all border',
+            'bg-white/[0.03] border-white/[0.06] text-white/40',
+            'hover:bg-accent/10 hover:border-accent/20 hover:text-accent-light'
+          )}
+        >
+          <Shield className="w-3 h-3" />
+          API
+        </button>
+        <button
+          onClick={() => setMcpModalOpen(true)}
+          className={cn(
+            'flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-2xs font-medium transition-all border',
+            'bg-white/[0.03] border-white/[0.06] text-white/40',
+            'hover:bg-emerald-400/10 hover:border-emerald-400/20 hover:text-emerald-400'
+          )}
+        >
+          <Plug className="w-3 h-3" />
+          MCP
+        </button>
+      </div>
+
       {/* ── Input container ────────────────────────────────── */}
       <div className={cn(
         'flex flex-col rounded-2xl',
@@ -421,6 +449,10 @@ export function ChatInput() {
         {' · '}
         <kbd className="px-1 py-0.5 rounded bg-white/[0.06] font-mono text-2xs">Shift+Enter</kbd> for new line
       </p>
+
+      {/* ── Modals ────────────────────────────────────────── */}
+      <ApiProviderModal open={apiModalOpen} onClose={() => setApiModalOpen(false)} />
+      <McpMarketplaceModal open={mcpModalOpen} onClose={() => setMcpModalOpen(false)} />
     </div>
   )
 }

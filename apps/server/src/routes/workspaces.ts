@@ -12,6 +12,7 @@ import fs from 'fs'
 import path from 'path'
 import { requireAuth, AuthRequest } from '../middleware/auth'
 import { prisma } from '../lib/prisma'
+import { detectMissingEnv, type MissingEnv } from '../services/envManager'
 
 export const workspacesRouter: Router = Router()
 
@@ -162,6 +163,108 @@ workspacesRouter.get('/:jobId/files', requireAuth, async (req: AuthRequest, res:
     })
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Failed to read workspace'
+    return res.status(500).json({ error: message })
+  }
+})
+
+// ─── GET /api/workspaces/:jobId/file?path=... ─────────────────
+// Returns the text content of a single file within the workspace.
+// Path traversal is prevented by resolving and checking the prefix.
+
+const MAX_FILE_SIZE = 500 * 1024 // 500 KB
+
+workspacesRouter.get('/:jobId/file', requireAuth, async (req: AuthRequest, res: Response) => {
+  const { jobId } = req.params
+  const filePath = req.query.path as string | undefined
+
+  if (!filePath) {
+    return res.status(400).json({ error: 'path query parameter is required' })
+  }
+
+  try {
+    const job = await prisma.job.findFirst({
+      where: {
+        id: jobId,
+        project: { userId: req.userId! },
+      },
+      select: { id: true, workspacePath: true },
+    })
+
+    if (!job) return res.status(404).json({ error: 'Job not found' })
+    if (!job.workspacePath) return res.status(404).json({ error: 'Workspace not found' })
+
+    // Path traversal protection
+    const resolvedWorkspace = path.resolve(job.workspacePath)
+    const resolvedFile = path.resolve(job.workspacePath, filePath)
+    if (!resolvedFile.startsWith(resolvedWorkspace + path.sep)) {
+      return res.status(403).json({ error: 'Access denied: path outside workspace' })
+    }
+
+    if (!fs.existsSync(resolvedFile)) {
+      return res.status(404).json({ error: 'File not found' })
+    }
+
+    const stat = fs.statSync(resolvedFile)
+    if (!stat.isFile()) {
+      return res.status(400).json({ error: 'Path is not a file' })
+    }
+
+    if (stat.size > MAX_FILE_SIZE) {
+      return res.json({
+        path: filePath,
+        content: `[File too large to display: ${(stat.size / 1024).toFixed(1)} KB]`,
+        size: stat.size,
+        truncated: true,
+      })
+    }
+
+    let content: string
+    try {
+      content = fs.readFileSync(resolvedFile, 'utf-8')
+    } catch {
+      return res.json({
+        path: filePath,
+        content: '[Binary file — cannot display as text]',
+        size: stat.size,
+        truncated: true,
+      })
+    }
+
+    return res.json({ path: filePath, content, size: stat.size, truncated: false })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Failed to read file'
+    return res.status(500).json({ error: message })
+  }
+})
+
+// ─── GET /api/workspaces/:jobId/env-check ───────────────────
+// Scans the generated workspace for env vars that the app references
+// but that are missing. Returns structured data so the frontend can
+// show a clear "these credentials are needed" UI instead of a blank preview.
+
+workspacesRouter.get('/:jobId/env-check', requireAuth, async (req: AuthRequest, res: Response) => {
+  const { jobId } = req.params
+
+  try {
+    const job = await prisma.job.findFirst({
+      where: { id: jobId, project: { userId: req.userId! } },
+      select: { id: true, workspacePath: true, status: true },
+    })
+
+    if (!job) return res.status(404).json({ error: 'Job not found' })
+    if (!job.workspacePath || !fs.existsSync(job.workspacePath)) {
+      return res.json({ missing: [], total: 0, healthy: true })
+    }
+
+    const missing = await detectMissingEnv(job.workspacePath)
+
+    return res.json({
+      missing,
+      total: missing.length,
+      healthy: missing.filter(m => m.isRequired).length === 0,
+    })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Failed to check env'
     return res.status(500).json({ error: message })
   }
 })

@@ -1,9 +1,15 @@
+
+
 /**
- * Builder Queue — Phase 4 hardening
+ * Builder Queue — Phase 4 hardening + Sprint 10-14 improvements
  *
- * Real file generation + real preview runtime + structured telemetry.
+ * AI-driven file generation + real preview runtime + structured telemetry
+ * + integration self-healing (S14-1).
  */
 
+import * as fs from 'fs'
+import * as nodePath from 'path'
+import { execSync } from 'child_process'
 import { Queue, Worker, Job, ConnectionOptions } from 'bullmq'
 import { JobStatus, Prisma } from '@prisma/client'
 import { prisma } from '../lib/prisma'
@@ -11,14 +17,21 @@ import { io } from '../index'
 import { getUserSocketIds } from '../socket/events'
 import {
   createWorkspace,
-  writeWorkspaceFile,
   getWorkspaceFileTree,
   getWorkspaceTotalBytes,
   validateWorkspaceFiles,
 } from '../services/workspace'
-import { generateScaffold, type ScaffoldInput } from '../services/scaffold'
+import {
+  generateProjectFiles,
+  repairProjectFiles,
+  parseDynamicPages,
+  type CodeGenProject,
+  type CodeGenCallbacks,
+} from '../services/codeGenerator'
+import { generateRepairPlan, analyzeError } from '../services/planner'
 import {
   startPreview,
+  PKG_MANAGER,
   type PreviewLogEntry,
   type PreviewTelemetryCallbacks,
 } from '../services/previewManager'
@@ -34,21 +47,102 @@ import {
   recordBuildComplete,
   recordBuildFailed,
   writeWorkspaceMemoryFile,
+  getCombinedContext,
+  getUserRules,
+  getProjectRules,
+  buildRulesBlock,
+  storeRepoSnapshot,
+  getRepoSnapshot,
+  buildRepoContext,
 } from '../services/memory'
+import { indexWorkspace } from '../services/workspaceIndexer'
+import {
+  emitAgentStatus,
+  emitPipelineStatus,
+  emitFileChange,
+  type AgentRole,
+} from '../agents'
 import {
   registerCredentialResolver,
   cancelCredentialResolver,
   CREDENTIAL_TIMEOUT_MS,
 } from '../services/credentialService'
+import {
+  validateAllIntegrations,
+  generateIntegrationErrorContext,
+} from '../services/integrationValidation'
+import {
+  calculateQualityMetrics,
+  shouldTriggerRepair,
+  generateRepairContext,
+} from '../services/codeQualityMetrics'
+import {
+  recordBuildOutcome,
+  getLearningState,
+  getQualityTrend,
+  shouldUseAggressiveRepair,
+} from '../services/buildHistory'
+import {
+  runAutonomousTests,
+  type TestEngineReport,
+} from '../services/testEngine'
+import {
+  runSecurityAudit,
+  type SecurityAuditReport,
+} from '../services/securityAudit'
+import {
+  generateProductIntelligence,
+  buildProductIntelligenceContext,
+} from '../services/productIntelligence'
+import {
+  designSchema,
+  renderPrismaSchema,
+  detectSchemaEvolution,
+  generateMigrationInstructions,
+  generateSeedData,
+  analyzeQueries,
+  generateRLSPolicies,
+  buildDatabaseContext,
+  type SchemaDesign,
+} from '../services/databaseArchitect'
+
+import {
+  pluginRegistry,
+  executeHooks,
+  collectPromptExtensions,
+  collectPluginDependencies,
+  collectPluginFileTemplates,
+  buildPluginStatusContext,
+  type PluginManifest,
+  type PluginHookContext,
+} from '../services/pluginSystem'
+
+import {
+  detectCodeSmells,
+  generateRefactorPlans,
+  analyzeOutdatedDeps,
+  detectApplicableMigrations,
+  buildRefactorContext,
+} from '../services/refactorAgent'
+
+import {
+  parsePreviewErrors,
+  buildPreviewRepairContext,
+  getAffectedFiles,
+  hasDependencyErrors,
+} from '../services/previewErrorParser'
 
 // ─── Redis connection ─────────────────────────────────────────
 
 const redisConnection: ConnectionOptions = {
   host: process.env.REDIS_HOST ?? 'localhost',
   port: parseInt(process.env.REDIS_PORT ?? '6379', 10),
-  maxRetriesPerRequest: 3,
-  enableOfflineQueue: false,
-  connectTimeout: 5000,
+  maxRetriesPerRequest: null,  // BullMQ requires null — it manages retries internally
+  enableOfflineQueue: true,    // Buffer commands during brief Redis disconnects
+  connectTimeout: 10000,
+  retryStrategy(times: number) {
+    return Math.min(times * 500, 5000)  // Retry with backoff up to 5s
+  },
 }
 
 // ─── Queue ────────────────────────────────────────────────────
@@ -99,6 +193,32 @@ function emitLog(userId: string, jobId: string, log: unknown) {
   emitToUser(userId, 'job:log', { jobId, log })
 }
 
+// ─── Agent status bridge ─────────────────────────────────────
+// Maps build phases to agent roles and emits agent:status events
+// so the frontend AgentStatusPanel stays in sync with the real build.
+
+const BUILD_STEP_TO_AGENT: Record<string, AgentRole> = {
+  workspace_prepare: 'installer',
+  scaffold_generate: 'installer',
+  files_write: 'frontend',
+  install_deps: 'installer',
+  preview_start: 'deploy',
+  preview_healthcheck: 'qa',
+  repair: 'fixer',
+  complete: 'deploy',
+}
+
+function emitBuildAgentStatus(step: string, status: 'running' | 'complete' | 'error') {
+  const agent = BUILD_STEP_TO_AGENT[step]
+  if (agent) {
+    emitAgentStatus(agent, status, `${agent}: ${step} ${status}`)
+  }
+}
+
+function emitBuildFileChange(filePath: string, agent: AgentRole, action: 'created' | 'modified') {
+  emitFileChange(action, filePath, agent, `${action}: ${filePath}`)
+}
+
 // ─── Log factory ──────────────────────────────────────────────
 
 interface BuildSocketLog {
@@ -144,9 +264,6 @@ function makeLog(
 }
 
 // ─── Section completeness validator (Gap 6) ──────────────────
-// Checks that each item in frontendScope has a corresponding file
-// in the generated workspace. Returns the list of scope items that
-// appear to be missing. Does NOT fail the build — surfaces as a warning.
 
 const SECTION_FILE_PATTERNS: Array<{ keywords: string[]; filePatterns: string[] }> = [
   { keywords: ['pricing', 'price'],          filePatterns: ['pricing', 'Pricing'] },
@@ -177,7 +294,7 @@ function validateSectionCompleteness(
     const patternGroup = SECTION_FILE_PATTERNS.find(p =>
       p.keywords.some(k => lower.includes(k))
     )
-    if (!patternGroup) continue // No known pattern to check — skip
+    if (!patternGroup) continue
 
     const hasFile = fileTree.some(filePath =>
       patternGroup.filePatterns.some(pattern => filePath.includes(pattern))
@@ -212,7 +329,7 @@ try {
         const retryCount = Math.max(job.attemptsMade ?? 0, 0)
         let currentPhase = 'initializing'
 
-        // Hoisted so catch block can access for memory writes (may remain null if error is early)
+        // Hoisted so catch block can access for memory writes
         let planRecord: { summary: unknown } | null = null
         let projectRecord: { name: string } | null = null
 
@@ -253,6 +370,30 @@ try {
             ...(patch ?? {}),
           })
           emitProgress(userId, jobId, status, currentStep, progress, allLogs)
+
+          // ── Emit agent status based on build phase ──
+          const stepToAgent: Record<string, AgentRole> = {
+            initializing: 'installer',
+            installing: 'installer',
+            installing_deps: 'installer',
+            generating_frontend: 'frontend',
+            generating_backend: 'backend',
+            wiring_auth: 'backend',
+            wiring_integrations: 'backend',
+            running: 'deploy',
+            testing: 'qa',
+            starting_preview: 'deploy',
+            repairing: 'fixer',
+            complete: 'deploy',
+            failed: 'fixer',
+          }
+          const agentRole = stepToAgent[status]
+          if (agentRole) {
+            const agentStatus = status === 'complete' ? 'complete' as const
+              : status === 'failed' ? 'error' as const
+              : 'running' as const
+            emitAgentStatus(agentRole, agentStatus, `${agentRole}: ${currentStep}`)
+          }
         }
 
         // ── Preview telemetry callbacks ───────────────────────
@@ -318,9 +459,7 @@ try {
         }
 
         // ── Credential pause/resume helper ───────────────────
-        // Pauses the build, emits credentials:requested to the user,
-        // and waits (up to CREDENTIAL_TIMEOUT_MS) for the user to provide or skip.
-        // Returns the provided values, or null if skipped/timed out.
+
         const waitForCredentials = async (params: {
           integration: string
           label: string
@@ -347,7 +486,6 @@ try {
             purpose: params.purpose,
           })
 
-          // Emit to frontend — triggers CredentialModal
           emitToUser(userId, 'credentials:requested', {
             requestId: credReq.id,
             jobId,
@@ -364,11 +502,10 @@ try {
             })
             return values
           } catch {
-            // Timeout — mark expired in DB
             await prisma.credentialRequest.update({
               where: { id: credReq.id },
               data: { status: 'expired' },
-            }).catch(() => {/* ignore if already updated */})
+            }).catch(() => {/* ignore */})
             await addLog('error', `CREDENTIALS TIMEOUT: ${params.label} — continuing without credentials`, 'install_deps', {
               requestId: credReq.id,
             })
@@ -397,8 +534,6 @@ try {
         // ── Main build flow ───────────────────────────────────
 
         try {
-          // Mark job as initializing FIRST — ensures frontend always gets at least one
-          // job:updated and job:log event before any lookup failures reach the catch block.
           await setJobStep(jobId, { status: 'initializing', startedAt: new Date(), retryCount })
           await setStep('initializing', 'Initializing project structure', 5)
           await addLog('info', `Build job started (attempt ${retryCount + 1})`, 'workspace_prepare', { jobId, projectId })
@@ -417,12 +552,145 @@ try {
           await addLog('info', `WORKSPACE ${workspacePath}`, 'workspace_prepare', { workspacePath })
 
           const features = Array.isArray(plan.features) ? plan.features as string[] : []
-          const techStack = (plan.techStack as Record<string, unknown>) ?? {}
+          const techStack = (plan.techStack as Record<string, string[]>) ?? {}
           const frontendScope = Array.isArray(plan.frontendScope) ? plan.frontendScope as string[] : []
           const backendScope = Array.isArray(plan.backendScope) ? plan.backendScope as string[] : []
           const integrations = Array.isArray(plan.integrations) ? plan.integrations as string[] : []
 
-          const scaffoldInput: ScaffoldInput = {
+          // ── Memory context (Sprint 7+) ──────────────────────
+          const memoryContext = await getCombinedContext(projectId, userId)
+          const userRules = await getUserRules(userId)
+          const projectRules = await getProjectRules(projectId)
+          const rulesBlock = buildRulesBlock(userRules, projectRules)
+          const existingSnapshot = await getRepoSnapshot(projectId)
+          const repoContext = existingSnapshot ? buildRepoContext(existingSnapshot) : undefined
+
+          // ── Product Intelligence (Roadmap #4) ─────────────────
+          // Generate product intelligence in parallel with build setup.
+          // Non-blocking — if it fails, the build proceeds without it.
+          const planSummary = typeof plan.summary === 'string' ? plan.summary : ''
+          const productIntelligence = await generateProductIntelligence(
+            planSummary,
+            project.name,
+            memoryContext ?? undefined,
+          ).catch((err) => {
+            console.warn('[Builder] Product intelligence generation failed (non-blocking):', err instanceof Error ? err.message : err)
+            return null
+          })
+          const productIntelligenceContext = productIntelligence
+            ? buildProductIntelligenceContext(productIntelligence)
+            : undefined
+
+          // ── Sprint 18: Learning state for generation strategy ──
+          const learningState = await getLearningState(projectId)
+          let learningContext = ''
+          if (learningState.qualityBaseline !== null) {
+            learningContext = `\n\nBUILD HISTORY CONTEXT:\n` +
+              `- Quality baseline: ${learningState.qualityBaseline}/100\n` +
+              `- Aggressive repair threshold: ${learningState.aggressiveRepairThreshold}\n` +
+              (learningState.preferredProvider
+                ? `- Best-performing provider: ${learningState.preferredProvider}\n`
+                : '') +
+              `- Focus on code quality, minimize complexity and duplication.\n`
+          }
+
+          // ── Database Architect (Roadmap #5) ─────────────────
+          // Design schema from product requirements. Non-blocking — if it fails
+          // the build falls back to the standard AI prompt for prisma/schema.
+          const hasBackend = backendScope.length > 0
+          const hasSupabase = integrations.some(i => /supabase/i.test(i))
+          let schemaDesign: SchemaDesign | null = null
+          let databaseContext: string | undefined
+
+          if (hasBackend) {
+            const planSummaryForDB = typeof plan.summary === 'string' ? plan.summary : ''
+            const existingModelNames = existingSnapshot?.prismaModels ?? []
+
+            schemaDesign = await designSchema(
+              planSummaryForDB, features, integrations, backendScope, existingModelNames,
+            ).catch((err) => {
+              console.warn('[Builder] Database architect schema design failed (non-blocking):', err instanceof Error ? err.message : err)
+              return null
+            })
+
+            if (schemaDesign) {
+              // Generate RLS policies if Supabase is detected
+              const rlsReport = hasSupabase ? generateRLSPolicies(schemaDesign) : null
+
+              // Detect schema evolution if there's an existing snapshot
+              let existingSchemaContent: string | null = null
+              if (workspacePath) {
+                try { existingSchemaContent = fs.readFileSync(nodePath.join(workspacePath, 'prisma', 'schema.prisma'), 'utf-8') } catch { /* no existing schema */ }
+              }
+              const migrationPlan = existingModelNames.length > 0
+                ? detectSchemaEvolution(existingModelNames, existingSchemaContent, schemaDesign)
+                : null
+
+              databaseContext = buildDatabaseContext(schemaDesign, null, rlsReport, migrationPlan) || undefined
+
+              if (migrationPlan?.hasChanges) {
+                const migrationLog = generateMigrationInstructions(migrationPlan)
+                console.log(`[DatabaseArchitect] Migration plan:\n${migrationLog}`)
+              }
+
+              console.log(`[DatabaseArchitect] Schema designed: ${schemaDesign.entities.length} entities, ${schemaDesign.enums.length} enums${rlsReport ? `, ${rlsReport.totalPolicies} RLS policies` : ''}`)
+            }
+          }
+
+          // ── Plugin System (Roadmap #6) ─────────────────────
+          const activePlugins = pluginRegistry.resolveActivePlugins(integrations, features, techStack)
+          const pluginHookCtx: PluginHookContext = {
+            workspacePath,
+            projectName: project.name,
+            features,
+            integrations,
+            techStack,
+            stage: 'pre:generate',
+          }
+
+          if (activePlugins.length > 0) {
+            console.log(`[PluginSystem] ${activePlugins.length} plugins active: ${activePlugins.map(p => p.id).join(', ')}`)
+            await addLog('info', `PLUGINS: ${activePlugins.length} active (${activePlugins.map(p => p.name).join(', ')})`, 'workspace_prepare', {})
+
+            // Execute post:scaffold hooks
+            const scaffoldResult = await executeHooks('post:scaffold', { ...pluginHookCtx, stage: 'post:scaffold' }, activePlugins)
+            if (scaffoldResult.files?.length) {
+              for (const file of scaffoldResult.files) {
+                const filePath = nodePath.join(workspacePath, file.relativePath)
+                fs.mkdirSync(nodePath.dirname(filePath), { recursive: true })
+                if (file.action === 'append' && fs.existsSync(filePath)) {
+                  fs.appendFileSync(filePath, file.content, 'utf-8')
+                } else if (file.action === 'prepend' && fs.existsSync(filePath)) {
+                  const existing = fs.readFileSync(filePath, 'utf-8')
+                  fs.writeFileSync(filePath, file.content + existing, 'utf-8')
+                } else {
+                  fs.writeFileSync(filePath, file.content, 'utf-8')
+                }
+              }
+            }
+
+            // Execute pre:generate hooks (can inject prompt context and env files)
+            const preGenResult = await executeHooks('pre:generate', { ...pluginHookCtx, stage: 'pre:generate' }, activePlugins)
+            if (preGenResult.files?.length) {
+              for (const file of preGenResult.files) {
+                const filePath = nodePath.join(workspacePath, file.relativePath)
+                fs.mkdirSync(nodePath.dirname(filePath), { recursive: true })
+                if (file.action === 'append' && fs.existsSync(filePath)) {
+                  fs.appendFileSync(filePath, file.content, 'utf-8')
+                } else {
+                  fs.writeFileSync(filePath, file.content, 'utf-8')
+                }
+              }
+            }
+          }
+
+          // Collect plugin prompt extensions for injection
+          const pluginPromptContext = activePlugins.length > 0
+            ? collectPromptExtensions(activePlugins, 'all')
+            : undefined
+
+          // ── Build CodeGenProject ────────────────────────────
+          const codeGenProject: CodeGenProject = {
             projectName: project.name,
             summary: typeof plan.summary === 'string' ? plan.summary : 'A CodedXP generated application',
             features,
@@ -430,89 +698,114 @@ try {
             frontendScope,
             backendScope,
             integrations,
+            memoryContext: (memoryContext ?? '') + learningContext + (pluginPromptContext ? '\n\n' + pluginPromptContext : '') || undefined,
+            rulesBlock: rulesBlock ?? undefined,
+            repoContext,
+            productIntelligenceContext,
+            databaseContext,
           }
 
-          currentPhase = 'scaffold'
-          await addLog('info', 'Generating scaffold', 'scaffold_generate', { templateVersion: '3.x' })
-          const scaffold = generateScaffold(scaffoldInput)
+          // ── Code generation callbacks ───────────────────────
+          const generatedFiles: Array<{
+            relativePath: string
+            content: string
+            bytes: number
+            generatedBy: 'ai' | 'template'
+          }> = []
 
-          currentPhase = 'files_write'
-          const writeBatch = async (paths: string[]) => {
-            for (const f of scaffold.files.filter(sf => paths.includes(sf.relativePath))) {
-              const written = writeWorkspaceFile(workspacePath, f.relativePath, f.content)
-              await addLog(
-                'create',
-                `CREATE ${f.relativePath} (${(written.bytes / 1024).toFixed(1)} KB)`,
+          const codeGenCallbacks: CodeGenCallbacks = {
+            onPhaseStart: async (phase, fileCount) => {
+              if (phase === 'frontend' || phase === 'templates') {
+                await setStep('generating_frontend', `Generating project files (${fileCount} files)`, 20)
+              } else if (phase === 'backend' || phase === 'ai') {
+                await setStep('generating_backend', `AI generating code (${fileCount} files)`, 45)
+              } else if (phase === 'config') {
+                await setStep('installing', `Writing configuration (${fileCount} files)`, 15)
+              } else if (phase === 'integration') {
+                await setStep('wiring_integrations', `Wiring integrations (${fileCount} files)`, 75)
+              } else if (phase === 'repair') {
+                await setStep('repairing', `Self-healing: repairing ${fileCount} file(s)`, 85)
+              }
+            },
+            onFileStart: async (filePath, description) => {
+              await addLog('create', `GENERATING ${filePath} — ${description}`, 'files_write', {}, filePath)
+            },
+            onFileComplete: async (filePath, bytes, generatedBy) => {
+              generatedFiles.push({
+                relativePath: filePath,
+                content: '', // Will be read from disk if needed
+                bytes,
+                generatedBy,
+              })
+              await addLog('create',
+                `CREATE ${filePath} (${(bytes / 1024).toFixed(1)} KB) [${generatedBy}]`,
                 'files_write',
-                { relativePath: f.relativePath, bytes: written.bytes },
-                f.relativePath,
-                written.bytes
+                { bytes, generatedBy },
+                filePath, bytes, generatedBy
               )
+              emitBuildFileChange(filePath, 'frontend', 'created')
+            },
+            onFileError: async (filePath, error) => {
+              await addLog('error', `ERROR ${filePath}: ${error}`, 'files_write', { error }, filePath)
+            },
+            onFileToken: async (filePath, delta) => {
+              emitToUser(userId, 'job:file_token', { jobId, path: filePath, delta })
+            },
+          }
+
+          // ── Phase 1: AI Code Generation ─────────────────────
+          currentPhase = 'scaffold'
+          await addLog('info', 'Starting AI code generation', 'scaffold_generate', {})
+          await generateProjectFiles(workspacePath, codeGenProject, codeGenCallbacks)
+
+          // Execute post:generate plugin hooks (write plugin file templates, etc.)
+          if (activePlugins.length > 0) {
+            const postGenResult = await executeHooks('post:generate', { ...pluginHookCtx, stage: 'post:generate' }, activePlugins)
+            if (postGenResult.files?.length) {
+              for (const file of postGenResult.files) {
+                const filePath = nodePath.join(workspacePath, file.relativePath)
+                fs.mkdirSync(nodePath.dirname(filePath), { recursive: true })
+                if (file.action === 'append' && fs.existsSync(filePath)) {
+                  fs.appendFileSync(filePath, file.content, 'utf-8')
+                } else {
+                  fs.writeFileSync(filePath, file.content, 'utf-8')
+                }
+              }
+            }
+            // Write plugin file templates that weren't already generated
+            const templates = collectPluginFileTemplates(activePlugins, {
+              hasAuth: features.some(f => /auth|login|register/i.test(f)),
+              hasStripe: integrations.some(i => /stripe/i.test(i)),
+              hasSupabase: integrations.some(i => /supabase/i.test(i)),
+            })
+            for (const tpl of templates) {
+              const tplPath = nodePath.join(workspacePath, tpl.relativePath)
+              if (!fs.existsSync(tplPath)) {
+                fs.mkdirSync(nodePath.dirname(tplPath), { recursive: true })
+                fs.writeFileSync(tplPath, tpl.content, 'utf-8')
+              }
             }
           }
 
-          const step1Files = ['package.json', 'README.md', '.gitignore', 'tsconfig.json', 'tsconfig.node.json']
-          await writeBatch(step1Files)
-
-          await setStep('installing', 'Writing build configuration', 15)
-          const step2Files = ['vite.config.ts', 'tailwind.config.js', 'postcss.config.js', 'index.html', '.env.example']
-          await writeBatch(step2Files)
-
-          await setStep('generating_frontend', 'Generating frontend code', 35)
-          const frontendPaths = [
-            'src/main.tsx', 'src/App.tsx', 'src/index.css', 'src/lib/api.ts',
-            'src/components/Header.tsx', 'src/components/Dashboard.tsx',
-            'src/pages/Home.tsx', 'src/pages/Login.tsx', 'src/pages/Register.tsx',
-          ]
-          await writeBatch(frontendPaths)
-
-          await setStep('generating_backend', 'Generating backend code', 55)
-          const backendPaths = ['server/index.ts', 'server/routes/api.ts']
-          await writeBatch(backendPaths)
-
-          await setStep('wiring_auth', 'Wiring authentication', 65)
-          const authPaths = ['server/routes/auth.ts', 'server/middleware/auth.ts']
-          await writeBatch(authPaths)
-
-          await setStep('wiring_integrations', 'Wiring integrations', 75)
-          const integrationPaths = ['prisma/schema.prisma']
-          await writeBatch(integrationPaths)
-
-          await setStep('running', 'Finalizing workspace', 85)
-          const writtenPaths = new Set([
-            ...step1Files, ...step2Files, ...frontendPaths,
-            ...backendPaths, ...authPaths, ...integrationPaths,
-          ])
-          for (const f of scaffold.files.filter(sf => !writtenPaths.has(sf.relativePath))) {
-            const written = writeWorkspaceFile(workspacePath, f.relativePath, f.content)
-            await addLog(
-              'create',
-              `CREATE ${f.relativePath} (${(written.bytes / 1024).toFixed(1)} KB)`,
-              'files_write',
-              { relativePath: f.relativePath, bytes: written.bytes },
-              f.relativePath,
-              written.bytes
-            )
+          // Read generated file contents for validation
+          for (const gf of generatedFiles) {
+            try {
+              gf.content = fs.readFileSync(nodePath.join(workspacePath, gf.relativePath), 'utf8')
+            } catch { /* non-fatal */ }
           }
 
+          // ── Phase 2: Workspace Validation ───────────────────
           currentPhase = 'scaffold_validate'
-          await setStep('testing', 'Validating workspace', 90)
+          await setStep('testing', 'Validating workspace', 88)
           const fileTree = getWorkspaceFileTree(workspacePath)
           const totalBytes = getWorkspaceTotalBytes(workspacePath)
-          const expectedFiles = scaffold.files.map(f => f.relativePath)
-          const missingFiles = validateWorkspaceFiles(workspacePath, expectedFiles)
 
           await addLog('validate', `VALIDATE ${fileTree.length} files, ${(totalBytes / 1024).toFixed(1)} KB total`, 'scaffold_validate', {
-            expected: expectedFiles.length,
             actual: fileTree.length,
+            totalBytes,
           })
 
-          if (missingFiles.length > 0) {
-            await addLog('error', `MISSING ${missingFiles.length} files`, 'scaffold_validate', { missingFiles })
-            throw new Error(`Workspace validation failed: ${missingFiles.length} missing files`)
-          }
-
-          // Gap 6: Section completeness validation — warn but never fail the build
+          // Gap 6: Section completeness validation — warn but never fail
           const missingSections = validateSectionCompleteness(frontendScope, fileTree)
           if (missingSections.length > 0) {
             await addLog(
@@ -528,6 +821,253 @@ try {
             })
           }
 
+          // ── Integration validation + self-healing (S14-1) ───
+          // Cross-file checks: Supabase, Stripe, API routes, route completeness,
+          // import resolution. If errors found: targeted repair, re-validate.
+          // Max 1 repair attempt. Never fails the build.
+          try {
+            const fileInputs = generatedFiles.map(gf => ({ relativePath: gf.relativePath, content: gf.content }))
+            const integrationResult = validateAllIntegrations(fileInputs, integrations)
+
+            if (integrationResult.errors.length > 0) {
+              await addLog(
+                'validate',
+                `INTEGRATION VALIDATION: ${integrationResult.errors.length} issue(s) found — triggering self-healing repair`,
+                'scaffold_validate',
+                { integrationErrors: integrationResult.errors.map(e => ({ file: e.filePath, msg: e.message })) }
+              )
+
+              emitToUser(userId, 'job:integration_repair', {
+                jobId,
+                phase: 'started',
+                errorCount: integrationResult.errors.length,
+                message: `Repairing ${integrationResult.errors.length} integration issue(s)`,
+              })
+
+              // Build error context with specific fix instructions
+              const errorContext = generateIntegrationErrorContext(integrationResult.errors)
+
+              // Identify unique affected files
+              const affectedFiles = [...new Set(integrationResult.errors.map(e => e.filePath))]
+              await addLog('info',
+                `INTEGRATION REPAIR: targeting ${affectedFiles.length} file(s): ${affectedFiles.join(', ')}`,
+                'scaffold_validate',
+                { affectedFiles }
+              )
+
+              // Build repair callbacks
+              const integrationRepairCallbacks: CodeGenCallbacks = {
+                onPhaseStart: async (_phase, fileCount) => {
+                  await setStep('repairing', `Integration self-healing: repairing ${fileCount} file(s)`, 91)
+                },
+                onFileStart: async (fp, description) => {
+                  await addLog('create', `INTEGRATION REPAIR ${fp} — ${description}`, 'scaffold_validate', {}, fp)
+                },
+                onFileComplete: async (fp, bytes, generatedBy) => {
+                  await addLog('create',
+                    `INTEGRATION REPAIRED ${fp} (${(bytes / 1024).toFixed(1)} KB) [${generatedBy}]`,
+                    'scaffold_validate',
+                    { bytes, generatedBy }, fp, bytes, generatedBy
+                  )
+                  emitBuildFileChange(fp, 'fixer', 'modified')
+                  // Update generatedFiles array with repaired content for re-validation
+                  const idx = generatedFiles.findIndex(g => g.relativePath === fp)
+                  if (idx >= 0) {
+                    try {
+                      const diskPath = nodePath.join(workspacePath, fp)
+                      const newContent = fs.readFileSync(diskPath, 'utf8')
+                      generatedFiles[idx] = { ...generatedFiles[idx], content: newContent, bytes, generatedBy }
+                    } catch { /* non-fatal */ }
+                  }
+                },
+                onFileError: async (fp, error) => {
+                  await addLog('error', `INTEGRATION REPAIR ERROR ${fp}: ${error}`, 'scaffold_validate', { error }, fp)
+                },
+                onFileToken: async (fp, delta) => {
+                  emitToUser(userId, 'job:file_token', { jobId, path: fp, delta })
+                },
+              }
+
+              // Run targeted repair with integration error context
+              const integrationRepairProject: CodeGenProject = {
+                ...codeGenProject,
+                memoryContext: (codeGenProject.memoryContext ?? '') + '\n\n' + errorContext,
+              }
+
+              try {
+                await repairProjectFiles(workspacePath, integrationRepairProject, affectedFiles, integrationRepairCallbacks)
+
+                // Re-run install in case repair added new deps (use centralized PKG_MANAGER)
+                // Ensure pnpm isolation files exist (match previewManager.runNpmInstall)
+                if (PKG_MANAGER === 'pnpm') {
+                  const npmrcPath = nodePath.join(workspacePath, '.npmrc')
+                  fs.writeFileSync(npmrcPath, 'node-linker=hoisted\nshamefully-hoist=true\nprefer-offline=true\n')
+                  const wsYaml = nodePath.join(workspacePath, 'pnpm-workspace.yaml')
+                  if (!fs.existsSync(wsYaml)) {
+                    fs.writeFileSync(wsYaml, 'packages: []\n')
+                  }
+                }
+                try {
+                  const installCmd = PKG_MANAGER === 'pnpm'
+                    ? 'pnpm install --no-frozen-lockfile --no-strict-peer-dependencies --prefer-offline --no-optional'
+                    : 'npm install --prefer-offline --no-audit --no-fund --no-optional'
+                  const installEnv: Record<string, string | undefined> = {
+                    ...process.env,
+                    CI: 'true',
+                    NODE_ENV: 'development',
+                    FORCE_COLOR: '0',
+                    npm_config_prefer_offline: 'true',
+                    npm_config_optional: 'false',
+                    npm_config_fetch_timeout: '60000',
+                    npm_config_fetch_retries: '3',
+                    npm_config_fetch_retry_mintimeout: '5000',
+                    npm_config_fetch_retry_maxtimeout: '30000',
+                    npm_config_progress: 'false',
+                  }
+                  await addLog('info', `INTEGRATION REPAIR: re-running ${installCmd}`, 'install_deps', {})
+                  execSync(installCmd, {
+                    cwd: workspacePath,
+                    stdio: 'pipe',
+                    timeout: 240_000,
+                    env: installEnv,
+                  })
+                  await addLog('info', 'INTEGRATION REPAIR: install complete', 'install_deps', {})
+                } catch (installErr: unknown) {
+                  const installMsg = installErr instanceof Error ? installErr.message : String(installErr)
+                  await addLog('info', `INTEGRATION REPAIR: install warning (non-fatal): ${installMsg.slice(0, 300)}`, 'install_deps', {})
+                }
+
+                // Re-validate after repair
+                const repairedFileInputs = generatedFiles.map(gf => ({ relativePath: gf.relativePath, content: gf.content }))
+                const revalidationResult = validateAllIntegrations(repairedFileInputs, integrations)
+
+                if (revalidationResult.errors.length === 0) {
+                  await addLog('success',
+                    `INTEGRATION SELF-HEALING: all ${integrationResult.errors.length} issue(s) resolved`,
+                    'scaffold_validate', {}
+                  )
+                  emitToUser(userId, 'job:integration_repair', {
+                    jobId,
+                    phase: 'complete',
+                    originalErrors: integrationResult.errors.length,
+                    remainingErrors: 0,
+                    message: `All ${integrationResult.errors.length} integration issue(s) resolved`,
+                  })
+                } else {
+                  const resolved = integrationResult.errors.length - revalidationResult.errors.length
+                  await addLog('validate',
+                    `INTEGRATION SELF-HEALING: ${resolved} of ${integrationResult.errors.length} issue(s) resolved, ${revalidationResult.errors.length} remaining`,
+                    'scaffold_validate',
+                    { remainingWarnings: revalidationResult.errors }
+                  )
+                  emitToUser(userId, 'job:integration_warning', {
+                    jobId,
+                    warnings: revalidationResult.errors,
+                    message: `${revalidationResult.errors.length} integration issue(s) remain after self-healing (${resolved} resolved)`,
+                  })
+                  emitToUser(userId, 'job:integration_repair', {
+                    jobId,
+                    phase: 'complete',
+                    originalErrors: integrationResult.errors.length,
+                    remainingErrors: revalidationResult.errors.length,
+                    message: `${resolved} of ${integrationResult.errors.length} issue(s) resolved`,
+                  })
+                }
+              } catch (repairErr: unknown) {
+                const repairMsg = repairErr instanceof Error ? repairErr.message : String(repairErr)
+                await addLog('info',
+                  `INTEGRATION REPAIR: failed (${repairMsg.slice(0, 300)}) — continuing with original warnings`,
+                  'scaffold_validate', {}
+                )
+                emitToUser(userId, 'job:integration_warning', {
+                  jobId,
+                  warnings: integrationResult.errors,
+                  message: `${integrationResult.errors.length} integration issue(s) detected (self-healing failed)`,
+                })
+                emitToUser(userId, 'job:integration_repair', {
+                  jobId,
+                  phase: 'failed',
+                  originalErrors: integrationResult.errors.length,
+                  message: `Self-healing failed: ${repairMsg.slice(0, 200)}`,
+                })
+              }
+            }
+          } catch (ivErr: unknown) {
+            await addLog('info',
+              `INTEGRATION VALIDATION: skipped (${ivErr instanceof Error ? ivErr.message : 'unknown error'})`,
+              'scaffold_validate', {}
+            )
+          }
+
+// ── Code Quality Analysis (Sprint 17) ─────────────────
+          const tsJsFiles = fileTree.filter(p => p.match(/\.(ts|tsx|js|jsx)$/))
+          const qualityReport = calculateQualityMetrics(workspacePath, tsJsFiles)
+          let qualityRepairTriggered = false
+
+          await addLog('validate', 
+            `CODE QUALITY: ${qualityReport.score}/100 | Functions: ${qualityReport.metrics.cyclomaticComplexity.functions} | Duplication: ${qualityReport.metrics.duplicationPercent.toFixed(1)}% | Warnings: ${qualityReport.metrics.warnings.length}`,
+            'code_quality',
+            { 
+              score: qualityReport.score,
+              duplication: qualityReport.metrics.duplicationPercent.toFixed(1),
+              warnings: qualityReport.metrics.warnings.length 
+            }
+          )
+
+          if (qualityReport.metrics.warnings.length > 0) {
+            emitToUser(userId, 'job:quality_warning', {
+              jobId,
+              score: qualityReport.score,
+              warnings: qualityReport.metrics.warnings,
+              message: `${qualityReport.metrics.warnings.length} code quality issue(s) detected`
+            })
+          }
+
+          // Sprint 18: check if aggressive repair should be used based on history
+          const useAggressiveRepair = await shouldUseAggressiveRepair(projectId)
+          const repairNeeded = useAggressiveRepair || shouldTriggerRepair(qualityReport.metrics)
+
+          if (repairNeeded) {
+            qualityRepairTriggered = true
+            emitToUser(userId, 'job:quality_repair_triggered', {
+              jobId,
+              score: qualityReport.score,
+              aggressive: useAggressiveRepair,
+              message: useAggressiveRepair
+                ? 'Declining quality trend detected - triggering aggressive repair'
+                : 'Low code quality detected - triggering auto-repair',
+            })
+
+            const qualityRepairContext = generateRepairContext(qualityReport)
+            const qualityRepairProject: CodeGenProject = {
+              ...codeGenProject,
+              memoryContext: (codeGenProject.memoryContext ?? '') + '\n\n' + qualityRepairContext,
+            }
+
+            // Quality-triggered repair (similar to integration repair)
+            const qualityRepairCallbacks: CodeGenCallbacks = {
+              onPhaseStart: async (_phase, fileCount) => {
+                await setStep('repairing', `Quality repair: ${fileCount} files`, 89)
+              },
+              onFileStart: async (filePath, description) => {
+                await addLog('create', `QUALITY REPAIR ${filePath}`, 'code_quality', {}, filePath)
+              },
+              onFileComplete: async (filePath, bytes, generatedBy) => {
+                await addLog('create', `QUALITY REPAIRED ${filePath}`, 'code_quality', { bytes }, filePath, bytes)
+                emitBuildFileChange(filePath, 'qa', 'modified')
+              },
+              onFileToken: async (filePath, delta) => {
+                emitToUser(userId, 'job:file_token', { jobId, path: filePath, delta })
+              },
+              onFileError: async (filePath, error) => {
+                await addLog('error', `QUALITY REPAIR ERROR ${filePath}`, 'code_quality', { error })
+              }
+            }
+
+            await repairProjectFiles(workspacePath, qualityRepairProject, tsJsFiles.slice(0, 10), qualityRepairCallbacks)
+          }
+
+          // ── Persist workspace metadata ──────────────────────
           const generatedKeyFiles = fileTree.filter(p =>
             p === 'package.json' ||
             p === 'vite.config.ts' ||
@@ -541,16 +1081,10 @@ try {
             generatedFileCount: fileTree.length,
             generatedTotalBytes: totalBytes,
             generatedKeyFiles: generatedKeyFiles as Prisma.InputJsonValue,
-            scaffoldValidation: {
-              expectedCount: expectedFiles.length,
-              actualCount: fileTree.length,
-              missingCount: 0,
-            } as Prisma.InputJsonValue,
           })
 
           await Promise.all(
-            scaffold.files.map(async (f) => {
-              const bytes = Buffer.byteLength(f.content, 'utf-8')
+            generatedFiles.map(async (f) => {
               return prisma.file.create({
                 data: {
                   projectId,
@@ -561,7 +1095,7 @@ try {
                     : f.relativePath.endsWith('.html') ? 'text/html'
                     : f.relativePath.endsWith('.css') ? 'text/css'
                     : 'text/typescript',
-                  size: bytes,
+                  size: f.bytes,
                   path: `${workspacePath}/${f.relativePath}`,
                   url: null,
                 },
@@ -569,7 +1103,7 @@ try {
             })
           )
 
-          // Persist workspace file count + total bytes (runtime-proven values)
+          // Persist workspace file count + total bytes
           await setJobStep(jobId, {
             workspacePath,
             fileCount: fileTree.length,
@@ -584,13 +1118,368 @@ try {
             throw new Error('Simulated install failure for testing (injectFailAt=install)')
           }
 
+          // ── Database Architect: Seed Data + Query Analysis (Roadmap #5) ──
+          if (hasBackend && schemaDesign) {
+            // Generate seed data
+            try {
+              const hasAuth = features.some(f => /auth|login|register|user/i.test(f))
+              const modelNames = schemaDesign.entities.map(e => e.name)
+              const seedPlan = await generateSeedData(modelNames, codeGenProject.summary, features, hasAuth)
+              if (seedPlan) {
+                const seedPath = nodePath.join(workspacePath, 'prisma', 'seed.ts')
+                fs.mkdirSync(nodePath.dirname(seedPath), { recursive: true })
+                fs.writeFileSync(seedPath, seedPlan.seedFile, 'utf-8')
+                await addLog('success', `SEED DATA: ${seedPlan.recordCount} records across ${seedPlan.entityCount} entities`, 'files_write', { entityCount: seedPlan.entityCount })
+                console.log(`[DatabaseArchitect] Seed file written: ${seedPlan.entityCount} entities, ${seedPlan.recordCount} records`)
+              }
+            } catch (seedErr) {
+              console.warn('[DatabaseArchitect] Seed generation failed (non-blocking):', seedErr instanceof Error ? seedErr.message : seedErr)
+            }
+
+            // Run query analysis on generated code
+            try {
+              const queryReport = analyzeQueries(workspacePath)
+              if (queryReport.issues.length > 0) {
+                await addLog(
+                  queryReport.score >= 70 ? 'validate' : 'error',
+                  `QUERY ANALYSIS: score ${queryReport.score}/100, ${queryReport.issues.length} issues found (${queryReport.totalQueriesDetected} queries scanned)`,
+                  'code_quality',
+                  { queryScore: queryReport.score, issueCount: queryReport.issues.length }
+                )
+                // Update database context with query report for repair context
+                const updatedDbContext = buildDatabaseContext(schemaDesign, queryReport, null, null)
+                if (updatedDbContext) {
+                  codeGenProject.databaseContext = (codeGenProject.databaseContext ?? '') + '\n\n' + updatedDbContext
+                }
+              } else {
+                await addLog('success', `QUERY ANALYSIS: clean — ${queryReport.totalQueriesDetected} queries scanned, no issues`, 'code_quality', {})
+              }
+            } catch (qaErr) {
+              console.warn('[DatabaseArchitect] Query analysis failed (non-blocking):', qaErr instanceof Error ? qaErr.message : qaErr)
+            }
+
+            // Write RLS policies file for Supabase projects
+            if (hasSupabase && schemaDesign) {
+              try {
+                const rlsReport = generateRLSPolicies(schemaDesign)
+                if (rlsReport.totalPolicies > 0) {
+                  const rlsPath = nodePath.join(workspacePath, 'supabase', 'rls-policies.sql')
+                  fs.mkdirSync(nodePath.dirname(rlsPath), { recursive: true })
+                  fs.writeFileSync(rlsPath, rlsReport.sql, 'utf-8')
+                  await addLog('success', `RLS POLICIES: ${rlsReport.totalPolicies} policies written to supabase/rls-policies.sql`, 'files_write', { policyCount: rlsReport.totalPolicies })
+                  console.log(`[DatabaseArchitect] RLS policies written: ${rlsReport.totalPolicies} policies`)
+                }
+              } catch (rlsErr) {
+                console.warn('[DatabaseArchitect] RLS policy generation failed (non-blocking):', rlsErr instanceof Error ? rlsErr.message : rlsErr)
+              }
+            }
+          }
+
+          // ── Refactor Analysis (Sprint 19) ───────────────────────
+          // Detect code smells, generate refactor plans, analyze dependencies,
+          // detect applicable migrations. Non-blocking — failures don't stop the build.
+          currentPhase = 'refactor_analysis'
+          await addLog('info', 'REFACTOR ANALYSIS: scanning for code smells and improvement opportunities...', 'code_quality', {})
+          try {
+            const smellReport = detectCodeSmells(workspacePath)
+            const totalSmells = smellReport.reduce((sum, s) => sum + s.instances.length, 0)
+
+            if (totalSmells > 0) {
+              await addLog('info', `CODE SMELLS: ${totalSmells} issues detected across ${smellReport.length} categories`, 'code_quality', {
+                smellCategories: smellReport.length,
+                totalSmells,
+              })
+
+              // Generate refactor plans for detected smells
+              const repoCtx = codeGenProject.repoContext ?? ''
+              const refactorPlans = await generateRefactorPlans(smellReport, repoCtx).catch(() => [])
+              if (refactorPlans.length > 0) {
+                await addLog('info', `REFACTOR PLANS: ${refactorPlans.length} improvement plans generated`, 'code_quality', {
+                  planCount: refactorPlans.length,
+                  highRisk: refactorPlans.filter(p => p.risk === 'high').length,
+                })
+              }
+
+              // Analyze outdated dependencies
+              const depReport = analyzeOutdatedDeps(workspacePath)
+              if (depReport.outdated.length > 0) {
+                await addLog('info', `DEPENDENCIES: ${depReport.outdated.length} outdated (${depReport.critical.length} critical)`, 'code_quality', {
+                  outdated: depReport.outdated.length,
+                  critical: depReport.critical.length,
+                })
+              }
+
+              // Detect applicable migrations
+              const techStack = codeGenProject.techStack
+              const migrations = detectApplicableMigrations(workspacePath, techStack)
+              if (migrations.length > 0) {
+                await addLog('info', `MIGRATIONS: ${migrations.length} applicable migration paths detected`, 'code_quality', {
+                  migrationCount: migrations.length,
+                  migrations: migrations.map(m => m.id),
+                })
+              }
+
+              // Build refactor context and inject into CodeGenProject
+              const refactorCtx = buildRefactorContext(smellReport, refactorPlans, depReport)
+              if (refactorCtx) {
+                codeGenProject.memoryContext = (codeGenProject.memoryContext ?? '') +
+                  '\n\n' + refactorCtx
+              }
+
+              // Emit refactor results to frontend
+              emitToUser(userId, 'job:refactor_analysis', {
+                jobId,
+                smells: smellReport.map(s => ({
+                  type: s.type,
+                  count: s.instances.length,
+                  severity: s.severity,
+                })),
+                plans: refactorPlans.slice(0, 5).map(p => ({
+                  id: p.id,
+                  title: p.title,
+                  risk: p.risk,
+                  affectedFiles: p.affectedFiles.length,
+                })),
+                dependencies: {
+                  outdated: depReport.outdated.length,
+                  critical: depReport.critical.length,
+                },
+                migrations: migrations.map(m => ({ id: m.id, name: m.name })),
+              })
+
+              console.log(`[RefactorAgent] Analysis complete: ${totalSmells} smells, ${refactorPlans.length} plans, ${depReport.outdated.length} outdated deps, ${migrations.length} migrations`)
+            } else {
+              await addLog('success', 'REFACTOR ANALYSIS: code is clean — no smells detected', 'code_quality', {})
+            }
+          } catch (refactorErr) {
+            console.warn('[RefactorAgent] Refactor analysis failed (non-blocking):', refactorErr instanceof Error ? refactorErr.message : refactorErr)
+          }
+
+          // ── Security Audit (Sprint 19) ─────────────────────────
+          currentPhase = 'security_audit'
+          emitBuildAgentStatus('preview_healthcheck', 'running') // QA agent handles security
+          await addLog('info', 'SECURITY AUDIT: scanning for vulnerabilities...', 'code_quality', {})
+          let securityReport: SecurityAuditReport | null = null
+          try {
+            securityReport = await runSecurityAudit(workspacePath, fileTree, async (msg) => {
+              await addLog('info', `SECURITY: ${msg}`, 'code_quality', {})
+            })
+            await addLog(
+              securityReport.securityScore >= 70 ? 'success' : 'validate',
+              `SECURITY SCORE: ${securityReport.securityScore}/100 | Critical: ${securityReport.counts.critical} | High: ${securityReport.counts.high} | Medium: ${securityReport.counts.medium}`,
+              'code_quality',
+              {
+                securityScore: securityReport.securityScore,
+                critical: securityReport.counts.critical,
+                high: securityReport.counts.high,
+              }
+            )
+            emitToUser(userId, 'job:security_audit', {
+              jobId,
+              securityScore: securityReport.securityScore,
+              counts: securityReport.counts,
+              findings: securityReport.findings.slice(0, 10),
+              vulnerabilities: securityReport.vulnerabilities.slice(0, 5),
+            })
+          } catch (secErr) {
+            await addLog('error', `SECURITY AUDIT ERROR: ${secErr instanceof Error ? secErr.message : String(secErr)}`, 'code_quality', {})
+          }
+
+          // ── Autonomous Testing (Sprint 19) ─────────────────────
+          currentPhase = 'testing'
+          await setStep('testing', 'Running autonomous tests...', 89)
+          let testReport: TestEngineReport | null = null
+          try {
+            testReport = await runAutonomousTests(workspacePath, fileTree, async (msg) => {
+              await addLog('info', `TEST: ${msg}`, 'code_quality', {})
+            })
+            if (testReport.testsRun && testReport.testResults) {
+              const tr = testReport.testResults
+              await addLog(
+                tr.success ? 'success' : 'validate',
+                `TESTS: ${tr.numPassed}/${tr.numTests} passed, ${tr.numFailed} failed (${tr.durationMs}ms)`,
+                'code_quality',
+                {
+                  passed: tr.numPassed,
+                  failed: tr.numFailed,
+                  total: tr.numTests,
+                  durationMs: tr.durationMs,
+                }
+              )
+              emitToUser(userId, 'job:test_results', {
+                jobId,
+                numTests: tr.numTests,
+                numPassed: tr.numPassed,
+                numFailed: tr.numFailed,
+                success: tr.success,
+                coverage: tr.coverage,
+                failures: tr.failures.slice(0, 5),
+              })
+              // Feed test failures to repair context for future builds
+              if (testReport.repairContext) {
+                await addLog('info', `TEST REPAIR CONTEXT: ${tr.numFailed} failures recorded for Fixer`, 'code_quality', {})
+              }
+            }
+          } catch (testErr) {
+            await addLog('error', `TEST ENGINE ERROR: ${testErr instanceof Error ? testErr.message : String(testErr)}`, 'code_quality', {})
+          }
+
           currentPhase = 'preview_start'
-          const previewInstance = await startPreview(
-            jobId,
-            workspacePath,
-            addPreviewLog,
-            previewCallbacks
-          )
+          let previewInstance
+          try {
+            previewInstance = await startPreview(
+              jobId,
+              workspacePath,
+              addPreviewLog,
+              previewCallbacks
+            )
+          } catch (previewErr) {
+            const previewErrorMessage = previewErr instanceof Error ? previewErr.message : String(previewErr)
+
+            await addLog(
+              'error',
+              `PREVIEW FAILED: ${previewErrorMessage} — starting auto-recovery`,
+              'preview_start',
+              {}
+            )
+
+            const previewLogLines = allLogs
+              .filter((l) => l.step === 'preview_start' || l.step === 'preview_runtime')
+              .map((l) => `${l.level}: ${l.message}`)
+
+            const parsedErrors = parsePreviewErrors(previewLogLines)
+            const affectedFiles = getAffectedFiles(parsedErrors)
+            const dependencyIssue = hasDependencyErrors(parsedErrors)
+
+            emitToUser(userId, 'job:preview_repair', {
+              jobId,
+              phase: 'started',
+              errorCount: parsedErrors.length,
+              affectedFiles,
+              dependencyIssue,
+              message: 'Preview recovery started',
+            })
+
+            if (dependencyIssue) {
+              // Ensure pnpm isolation files exist (match previewManager.runNpmInstall)
+              if (PKG_MANAGER === 'pnpm') {
+                const npmrcPath = nodePath.join(workspacePath, '.npmrc')
+                fs.writeFileSync(npmrcPath, 'node-linker=hoisted\nshamefully-hoist=true\nprefer-offline=true\n')
+                const wsYaml = nodePath.join(workspacePath, 'pnpm-workspace.yaml')
+                if (!fs.existsSync(wsYaml)) {
+                  fs.writeFileSync(wsYaml, 'packages: []\n')
+                }
+              }
+              try {
+                const recoverCmd = PKG_MANAGER === 'pnpm'
+                  ? 'pnpm install --no-frozen-lockfile --no-strict-peer-dependencies --prefer-offline --no-optional'
+                  : 'npm install --prefer-offline --no-audit --no-fund --no-optional'
+                const recoverEnv: Record<string, string | undefined> = {
+                  ...process.env,
+                  CI: 'true',
+                  NODE_ENV: 'development',
+                  FORCE_COLOR: '0',
+                  npm_config_prefer_offline: 'true',
+                  npm_config_optional: 'false',
+                  npm_config_fetch_timeout: '60000',
+                  npm_config_fetch_retries: '3',
+                  npm_config_fetch_retry_mintimeout: '5000',
+                  npm_config_fetch_retry_maxtimeout: '30000',
+                  npm_config_progress: 'false',
+                }
+                await addLog('info', `PREVIEW RECOVERY: reinstalling dependencies (${recoverCmd})`, 'install_deps', {})
+                execSync(recoverCmd, {
+                  cwd: workspacePath,
+                  stdio: 'pipe',
+                  timeout: 240_000,
+                  env: recoverEnv,
+                })
+                await addLog('success', 'PREVIEW RECOVERY: dependency install complete', 'install_deps', {})
+              } catch (depErr) {
+                const depErrMsg = depErr instanceof Error ? depErr.message : String(depErr)
+                await addLog('info', `PREVIEW RECOVERY: dependency install warning (non-fatal): ${depErrMsg}`, 'install_deps', {})
+              }
+            }
+
+            if (affectedFiles.length > 0) {
+              const repairContext = buildPreviewRepairContext(parsedErrors)
+              const previewRepairProject: CodeGenProject = {
+                ...codeGenProject,
+                memoryContext: (codeGenProject.memoryContext ?? '') + '\n\n' + repairContext,
+              }
+
+              const previewRepairCallbacks: CodeGenCallbacks = {
+                onPhaseStart: async (_phase, fileCount) => {
+                  await setStep('repairing', `Preview self-healing: repairing ${fileCount} file(s)`, 93)
+                },
+                onFileStart: async (filePath, description) => {
+                  await addLog('create', `PREVIEW REPAIR ${filePath} — ${description}`, 'preview_start', {}, filePath)
+                },
+                onFileComplete: async (filePath, bytes, generatedBy) => {
+                  await addLog(
+                    'create',
+                    `PREVIEW REPAIRED ${filePath} (${(bytes / 1024).toFixed(1)} KB) [${generatedBy}]`,
+                    'preview_start',
+                    { bytes, generatedBy },
+                    filePath,
+                    bytes,
+                    generatedBy
+                  )
+                  emitBuildFileChange(filePath, 'fixer', 'modified')
+
+                  const idx = generatedFiles.findIndex((g) => g.relativePath === filePath)
+                  if (idx >= 0) {
+                    try {
+                      const diskPath = `${workspacePath}/${filePath}`
+                      const newContent = fs.readFileSync(diskPath, 'utf8')
+                      generatedFiles[idx] = {
+                        ...generatedFiles[idx],
+                        content: newContent,
+                        bytes,
+                        generatedBy: generatedBy as 'ai' | 'template',
+                      }
+                    } catch {
+                      // non-fatal
+                    }
+                  }
+                },
+                onFileError: async (filePath, error) => {
+                  await addLog('error', `PREVIEW REPAIR ERROR ${filePath}: ${error}`, 'preview_start', { error }, filePath)
+                },
+                onFileToken: async (filePath, delta) => {
+                  emitToUser(userId, 'job:file_token', { jobId, path: filePath, delta })
+                },
+              }
+
+              await repairProjectFiles(workspacePath, previewRepairProject, affectedFiles, previewRepairCallbacks)
+            }
+
+            await addLog('info', 'PREVIEW RECOVERY: retrying preview start (attempt 2/2)', 'preview_start', {})
+
+            try {
+              previewInstance = await startPreview(
+                jobId,
+                workspacePath,
+                addPreviewLog,
+                previewCallbacks
+              )
+              emitToUser(userId, 'job:preview_repair', {
+                jobId,
+                phase: 'complete',
+                errorCount: parsedErrors.length,
+                message: 'Preview recovery succeeded',
+              })
+            } catch (retryErr) {
+              const retryErrMsg = retryErr instanceof Error ? retryErr.message : String(retryErr)
+              emitToUser(userId, 'job:preview_repair', {
+                jobId,
+                phase: 'failed',
+                errorCount: parsedErrors.length,
+                message: `Preview recovery failed: ${retryErrMsg}`,
+              })
+              throw retryErr
+            }
+          }
 
           await addLog('success', `PREVIEW READY at ${previewInstance.url}`, 'complete', {
             previewUrl: previewInstance.url,
@@ -598,7 +1487,6 @@ try {
             previewPid: previewInstance.pid,
           })
 
-          // buildMeta: { missingSections, installDurationMs, startDurationMs } — Gap 6 completion validator
           await setJobStep(jobId, {
             status: 'complete',
             currentStep: 'Preview ready',
@@ -632,6 +1520,10 @@ try {
             previewPort: previewInstance.port,
             previewPid: previewInstance.pid,
           })
+          emitPipelineStatus('complete', 'Build complete', {
+            totalFiles: generatedFiles.length,
+            previewUrl: previewInstance.url,
+          })
           emitToUser(userId, 'preview:ready', {
             jobId,
             url: previewInstance.url,
@@ -647,7 +1539,39 @@ try {
             projectName: project.name,
             projectSummary: typeof plan.summary === 'string' ? plan.summary : '',
           })
-          // Write memory.md into workspace as supplemental artifact (synchronous, non-fatal)
+
+          // Sprint 18: Record build outcome for history-aware learning
+          const aiFileCount = generatedFiles.filter(f => f.generatedBy === 'ai').length
+          const providerUsed = aiFileCount > 0 ? 'ai-primary' : 'template-only'
+          void recordBuildOutcome({
+            buildId: jobId,
+            qualityScore: qualityReport.score,
+            complexityScore: qualityReport.metrics.cyclomaticComplexity.avg,
+            duplicationScore: qualityReport.metrics.duplicationPercent,
+            securityScore: Math.max(0, 100 - qualityReport.metrics.securityHotspots * 10),
+            overallScore: qualityReport.score,
+            repairTriggered: qualityRepairTriggered,
+            repairSuccess: qualityRepairTriggered ? true : null, // success path = repair worked if triggered
+            providerUsed,
+            workerName: 'local',
+            timestamp: new Date(),
+            projectId,
+          })
+
+          // Sprint 18: Emit quality trend to frontend
+          const qualityTrend = await getQualityTrend(projectId)
+          if (qualityTrend) {
+            emitToUser(userId, 'job:quality_trend', {
+              jobId,
+              trend: qualityTrend.trend,
+              delta: qualityTrend.delta,
+              baseline: qualityTrend.baseline,
+              recentAverage: qualityTrend.recentAverage,
+              buildCount: qualityTrend.buildCount,
+            })
+          }
+
+          // Write memory.md into workspace
           writeWorkspaceMemoryFile(workspacePath, {
             projectName: project.name,
             projectId,
@@ -656,6 +1580,10 @@ try {
             integrations,
             buildTimestamp: new Date().toISOString(),
           })
+
+          // Store repo snapshot for future builds (Sprint 7+)
+          void storeRepoSnapshot(projectId, userId, indexWorkspace(workspacePath))
+
         } catch (err) {
           const message = err instanceof Error ? err.message : 'Build failed'
           const errorDetails = err instanceof Error && err.stack
@@ -689,6 +1617,10 @@ try {
             jobId,
             error: { code: 'BUILD_FAILED', message, category, retryCount },
           })
+          emitPipelineStatus('error', `Build failed: ${message}`, {
+            phase: currentPhase,
+            category,
+          })
 
           // Record build failure in memory (async/non-blocking)
           void recordBuildFailed(projectId, userId, {
@@ -699,12 +1631,31 @@ try {
             projectSummary: typeof planRecord?.summary === 'string' ? planRecord.summary : '',
           })
 
+          // Sprint 18: Record failed build outcome for learning
+          void recordBuildOutcome({
+            buildId: jobId,
+            qualityScore: 0,
+            complexityScore: 0,
+            duplicationScore: 0,
+            securityScore: 0,
+            overallScore: 0,
+            repairTriggered: false,
+            repairSuccess: false,
+            providerUsed: 'unknown',
+            workerName: 'local',
+            timestamp: new Date(),
+            projectId,
+          })
+
           throw err
         }
       },
       {
         connection: redisConnection,
         concurrency: 3,
+        lockDuration: 900_000,       // 15 min — AI code gen + validation + retries for full project
+        stalledInterval: 450_000,    // 7.5 min — check for stalled jobs
+        lockRenewTime: 200_000,      // renew lock every ~3.3 min (well within 15 min lockDuration)
       }
     )
     console.log('[Builder] Worker initialized successfully')

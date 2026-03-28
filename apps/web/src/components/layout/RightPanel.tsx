@@ -15,13 +15,13 @@ import type { PanelState } from '@/types'
 // ─── Panel transition config ──────────────────────────────────
 
 const panelVariants = {
-  enter: { opacity: 0, y: 8, scale: 0.99 },
-  center: { opacity: 1, y: 0, scale: 1 },
-  exit: { opacity: 0, y: -8, scale: 0.99 },
+  enter: { opacity: 0, scale: 0.98 },
+  center: { opacity: 1, scale: 1 },
+  exit: { opacity: 0, scale: 0.98 },
 }
 
 const transition = {
-  duration: 0.3,
+  duration: 0.4,
   ease: [0.4, 0, 0.2, 1] as [number, number, number, number],
 }
 
@@ -58,9 +58,7 @@ export function RightPanel() {
     (panelMode === 'building' || panelMode === 'preview') && !!activeJobId
 
   return (
-    <div className="relative flex flex-col h-full w-full overflow-hidden bg-base">
-      {/* Subtle grid background */}
-      <div className="absolute inset-0 bg-grid opacity-40 pointer-events-none" />
+    <div className="relative flex flex-col h-full w-full overflow-hidden bg-[#0a0a14]">
 
       {/* File Explorer toggle button — shown during building/preview */}
       {canShowExplorer && (
@@ -69,8 +67,8 @@ export function RightPanel() {
             onClick={() => setActiveTab((v) => v === 'explorer' ? null : 'explorer')}
             className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all border ${
               activeTab === 'explorer'
-                ? 'bg-accent/20 border-accent/40 text-accent'
-                : 'bg-surface/80 border-border/40 text-muted hover:text-primary hover:border-border'
+                ? 'bg-accent/15 border-accent/30 text-accent'
+                : 'bg-white/[0.04] border-white/[0.08] text-white/40 hover:text-white/60 hover:border-white/[0.12]'
             }`}
             title={activeTab === 'explorer' ? 'Hide file explorer' : 'View generated files'}
           >

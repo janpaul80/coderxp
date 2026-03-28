@@ -1,40 +1,60 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# setup-ssl.sh — CoderXP SSL/HTTPS setup for coderxp.app
+# setup-ssl.sh — CoderXP SSL/HTTPS setup (domain-agnostic)
 #
-# Run this ONCE on the production server (87.106.111.220) as root or sudo.
+# Run this ONCE on the production server as root or sudo.
 #
 # What it does:
 #   1. Installs nginx (if not present)
 #   2. Installs certbot + nginx plugin (if not present)
 #   3. Creates /var/www/certbot for ACME challenges
 #   4. Deploys the nginx config (HTTP-only first, for ACME challenge)
-#   5. Obtains Let's Encrypt certificate for coderxp.app + www.coderxp.app
-#   6. Deploys the full SSL nginx config
+#   5. Obtains Let's Encrypt certificate for DOMAIN + www.DOMAIN
+#   6. Deploys the full SSL nginx config (generated from app.conf.template)
 #   7. Sets up auto-renewal via systemd timer (or cron fallback)
 #   8. Verifies the setup
 #
 # Usage:
-#   chmod +x setup-ssl.sh
-#   sudo ./setup-ssl.sh
+#   DOMAIN=yournewdomain.com ./scripts/setup-ssl.sh
+#   # or:
+#   DOMAIN=yournewdomain.com CERT_EMAIL=you@example.com ./scripts/setup-ssl.sh
+#
+# Required env vars:
+#   DOMAIN        — apex domain, e.g. yournewdomain.com
+#
+# Optional env vars:
+#   CERT_EMAIL    — email for Let's Encrypt expiry alerts (default: admin@DOMAIN)
+#   SERVER_IP     — server IP for DNS check hint in output (default: 87.106.111.220)
+#   WEBROOT       — frontend dist path (default: /var/www/coderxp/dist)
 #
 # Prerequisites:
-#   - DNS: coderxp.app → 87.106.111.220 (A record, already set)
-#   - DNS: www.coderxp.app → 87.106.111.220 (A record)
+#   - DNS: DOMAIN → SERVER_IP (A record must be live)
+#   - DNS: www.DOMAIN → SERVER_IP (A record)
 #   - Port 80 and 443 open in firewall
 #   - Ubuntu 20.04+ or Debian 11+
 # ─────────────────────────────────────────────────────────────────────────────
 
 set -euo pipefail
 
-DOMAIN="coderxp.app"
-WWW_DOMAIN="www.coderxp.app"
-EMAIL="admin@coderxp.app"          # Change to your real email for cert expiry alerts
-NGINX_CONF_SRC="$(cd "$(dirname "$0")/.." && pwd)/nginx/coderxp.app.conf"
+# ─── Config — all domain-specific values come from env ────────
+
+DOMAIN="${DOMAIN:-}"
+if [[ -z "$DOMAIN" ]]; then
+    echo "ERROR: DOMAIN env var is required."
+    echo "Usage: DOMAIN=yournewdomain.com ./scripts/setup-ssl.sh"
+    exit 1
+fi
+
+WWW_DOMAIN="www.${DOMAIN}"
+CERT_EMAIL="${CERT_EMAIL:-admin@${DOMAIN}}"
+SERVER_IP="${SERVER_IP:-87.106.111.220}"
+WEBROOT="${WEBROOT:-/var/www/coderxp/dist}"
+CERTBOT_WEBROOT="/var/www/certbot"
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+NGINX_TEMPLATE="$REPO_ROOT/nginx/app.conf.template"
 NGINX_SITES_AVAILABLE="/etc/nginx/sites-available"
 NGINX_SITES_ENABLED="/etc/nginx/sites-enabled"
-WEBROOT="/var/www/coderxp/dist"
-CERTBOT_WEBROOT="/var/www/certbot"
 
 # ─── Colour helpers ───────────────────────────────────────────
 
@@ -51,8 +71,15 @@ section() { echo -e "\n${GREEN}════════════════�
 # ─── Root check ───────────────────────────────────────────────
 
 if [[ $EUID -ne 0 ]]; then
-    error "This script must be run as root. Use: sudo ./setup-ssl.sh"
+    error "This script must be run as root. Use: sudo DOMAIN=${DOMAIN} ./setup-ssl.sh"
 fi
+
+section "CoderXP SSL Setup — domain: ${DOMAIN}"
+info "Apex domain:  ${DOMAIN}"
+info "www domain:   ${WWW_DOMAIN}"
+info "Cert email:   ${CERT_EMAIL}"
+info "Webroot:      ${WEBROOT}"
+info "Server IP:    ${SERVER_IP}"
 
 # ─── Step 1: Install nginx ────────────────────────────────────
 
@@ -98,7 +125,7 @@ mkdir -p /var/log/nginx
 
 # Placeholder index.html so nginx doesn't 404 before first deploy
 if [[ ! -f "$WEBROOT/index.html" ]]; then
-    cat > "$WEBROOT/index.html" <<'HTML'
+    cat > "$WEBROOT/index.html" <<HTML
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -134,15 +161,15 @@ cat > "$NGINX_SITES_AVAILABLE/$DOMAIN" <<NGINX_HTTP
 server {
     listen 80;
     listen [::]:80;
-    server_name $DOMAIN $WWW_DOMAIN;
+    server_name ${DOMAIN} ${WWW_DOMAIN};
 
     location /.well-known/acme-challenge/ {
-        root $CERTBOT_WEBROOT;
+        root ${CERTBOT_WEBROOT};
         allow all;
     }
 
     location / {
-        root $WEBROOT;
+        root ${WEBROOT};
         index index.html;
         try_files \$uri \$uri/ /index.html;
     }
@@ -178,7 +205,7 @@ else
     certbot certonly \
         --webroot \
         --webroot-path="$CERTBOT_WEBROOT" \
-        --email "$EMAIL" \
+        --email "$CERT_EMAIL" \
         --agree-tos \
         --no-eff-email \
         --domains "$DOMAIN,$WWW_DOMAIN" \
@@ -204,16 +231,20 @@ if [[ ! -f "/etc/letsencrypt/ssl-dhparams.pem" ]]; then
     openssl dhparam -out /etc/letsencrypt/ssl-dhparams.pem 2048
 fi
 
-# ─── Step 6: Deploy full SSL nginx config ────────────────────
+# ─── Step 6: Deploy full SSL nginx config from template ───────
 
 section "Step 6: Deploy full SSL nginx config"
 
-if [[ -f "$NGINX_CONF_SRC" ]]; then
-    cp "$NGINX_CONF_SRC" "$NGINX_SITES_AVAILABLE/$DOMAIN"
-    info "Deployed nginx config from repo: $NGINX_CONF_SRC"
+if [[ -f "$NGINX_TEMPLATE" ]]; then
+    info "Generating nginx config from template: $NGINX_TEMPLATE"
+    # Use envsubst to substitute DOMAIN and WEBROOT into the template
+    # Only substitute these two variables — leave nginx $variables untouched
+    DOMAIN="$DOMAIN" WEBROOT="$WEBROOT" \
+        envsubst '${DOMAIN} ${WEBROOT}' < "$NGINX_TEMPLATE" \
+        > "$NGINX_SITES_AVAILABLE/$DOMAIN"
+    info "Deployed nginx config to $NGINX_SITES_AVAILABLE/$DOMAIN"
 else
-    warn "Repo nginx config not found at $NGINX_CONF_SRC"
-    warn "Writing inline SSL config..."
+    warn "Template not found at $NGINX_TEMPLATE — writing inline SSL config..."
 
     cat > "$NGINX_SITES_AVAILABLE/$DOMAIN" <<NGINX_SSL
 upstream coderxp_node {
@@ -224,38 +255,38 @@ upstream coderxp_node {
 server {
     listen 80;
     listen [::]:80;
-    server_name $DOMAIN $WWW_DOMAIN;
+    server_name ${DOMAIN} ${WWW_DOMAIN};
 
     location /.well-known/acme-challenge/ {
-        root $CERTBOT_WEBROOT;
+        root ${CERTBOT_WEBROOT};
         allow all;
     }
 
     location / {
-        return 301 https://$DOMAIN\$request_uri;
+        return 301 https://${DOMAIN}\$request_uri;
     }
 }
 
 server {
     listen 443 ssl http2;
     listen [::]:443 ssl http2;
-    server_name $WWW_DOMAIN;
+    server_name ${WWW_DOMAIN};
 
-    ssl_certificate     /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/$DOMAIN/privkey.pem;
+    ssl_certificate     /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${DOMAIN}/privkey.pem;
     include             /etc/letsencrypt/options-ssl-nginx.conf;
     ssl_dhparam         /etc/letsencrypt/ssl-dhparams.pem;
 
-    return 301 https://$DOMAIN\$request_uri;
+    return 301 https://${DOMAIN}\$request_uri;
 }
 
 server {
     listen 443 ssl http2;
     listen [::]:443 ssl http2;
-    server_name $DOMAIN;
+    server_name ${DOMAIN};
 
-    ssl_certificate     /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/$DOMAIN/privkey.pem;
+    ssl_certificate     /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${DOMAIN}/privkey.pem;
     include             /etc/letsencrypt/options-ssl-nginx.conf;
     ssl_dhparam         /etc/letsencrypt/ssl-dhparams.pem;
 
@@ -264,7 +295,6 @@ server {
     add_header X-Content-Type-Options    "nosniff"                                      always;
 
     client_max_body_size 50m;
-
     gzip on;
     gzip_types text/plain text/css application/javascript application/json image/svg+xml;
 
@@ -287,21 +317,11 @@ server {
         proxy_read_timeout 300s;
     }
 
-    location /uploads/ {
-        proxy_pass http://coderxp_node;
-    }
+    location /uploads/ { proxy_pass http://coderxp_node; }
+    location /internal/ { proxy_pass http://coderxp_node; proxy_read_timeout 300s; }
+    location /health    { proxy_pass http://coderxp_node; access_log off; }
 
-    location /internal/ {
-        proxy_pass         http://coderxp_node;
-        proxy_read_timeout 300s;
-    }
-
-    location /health {
-        proxy_pass  http://coderxp_node;
-        access_log  off;
-    }
-
-    root  $WEBROOT;
+    root  ${WEBROOT};
     index index.html;
 
     location ~* \.(js|css|woff2?|ttf|eot|ico|png|jpg|jpeg|gif|svg|webp)$ {
@@ -327,9 +347,6 @@ info "nginx reloaded with full SSL config"
 # ─── Step 7: Auto-renewal ─────────────────────────────────────
 
 section "Step 7: Configure auto-renewal"
-
-# Certbot snap installs a systemd timer automatically.
-# Check if it's active; if not, fall back to cron.
 
 if systemctl is-active --quiet snap.certbot.renew.timer 2>/dev/null; then
     info "Certbot systemd timer already active (snap install)"
@@ -368,23 +385,23 @@ fi
 
 section "Step 9: Verification"
 
-info "Checking HTTPS response from https://$DOMAIN/health ..."
+info "Checking HTTPS response from https://${DOMAIN}/health ..."
 sleep 2
 
-HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "https://$DOMAIN/health" 2>/dev/null || echo "FAILED")
+HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "https://${DOMAIN}/health" 2>/dev/null || echo "FAILED")
 if [[ "$HTTP_STATUS" == "200" ]]; then
-    info "✅ https://$DOMAIN/health → HTTP $HTTP_STATUS"
+    info "✅ https://${DOMAIN}/health → HTTP $HTTP_STATUS"
 else
-    warn "⚠️  https://$DOMAIN/health → HTTP $HTTP_STATUS (Node.js may not be running yet)"
+    warn "⚠️  https://${DOMAIN}/health → HTTP $HTTP_STATUS (Node.js may not be running yet)"
 fi
 
-HTTP_REDIRECT=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 -L "http://$DOMAIN/" 2>/dev/null || echo "FAILED")
-info "HTTP redirect check: http://$DOMAIN/ → $HTTP_REDIRECT"
+HTTP_REDIRECT=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 -L "http://${DOMAIN}/" 2>/dev/null || echo "FAILED")
+info "HTTP redirect check: http://${DOMAIN}/ → $HTTP_REDIRECT"
 
-WWW_REDIRECT=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 -L "https://$WWW_DOMAIN/" 2>/dev/null || echo "FAILED")
-info "www redirect check: https://$WWW_DOMAIN/ → $WWW_REDIRECT"
+WWW_REDIRECT=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 -L "https://${WWW_DOMAIN}/" 2>/dev/null || echo "FAILED")
+info "www redirect check: https://${WWW_DOMAIN}/ → $WWW_REDIRECT"
 
-CERT_EXPIRY=$(echo | openssl s_client -servername "$DOMAIN" -connect "$DOMAIN:443" 2>/dev/null | openssl x509 -noout -dates 2>/dev/null | grep notAfter || echo "Could not check")
+CERT_EXPIRY=$(echo | openssl s_client -servername "${DOMAIN}" -connect "${DOMAIN}:443" 2>/dev/null | openssl x509 -noout -dates 2>/dev/null | grep notAfter || echo "Could not check")
 info "Certificate expiry: $CERT_EXPIRY"
 
 # ─── Done ─────────────────────────────────────────────────────
@@ -392,20 +409,20 @@ info "Certificate expiry: $CERT_EXPIRY"
 section "SSL Setup Complete"
 
 echo ""
-echo -e "${GREEN}  ✅ HTTPS is live for coderxp.app${NC}"
+echo -e "${GREEN}  ✅ HTTPS is live for ${DOMAIN}${NC}"
 echo ""
 echo "  Next steps:"
 echo "  1. Deploy the frontend build:"
-echo "     Run: ./scripts/deploy.sh  (from your local machine)"
+echo "     DOMAIN=${DOMAIN} ./scripts/deploy.sh  (from your local machine)"
 echo ""
 echo "  2. Update server .env.local:"
-echo "     CLIENT_URL=https://coderxp.app"
-echo "     PUBLIC_URL=https://coderxp.app"
+echo "     CLIENT_URL=https://${DOMAIN}"
+echo "     CORS_ORIGINS=https://${DOMAIN},https://www.${DOMAIN}"
 echo ""
 echo "  3. Restart the Node.js server:"
-echo "     pm2 restart coderxp-server  (or systemctl restart coderxp)"
+echo "     pm2 restart coderxp-server"
 echo ""
 echo "  4. Verify full stack:"
-echo "     curl https://coderxp.app/health"
-echo "     curl https://coderxp.app/api/providers/status"
+echo "     curl https://${DOMAIN}/health"
+echo "     curl https://${DOMAIN}/api/providers/status"
 echo ""

@@ -21,8 +21,10 @@ import {
   PLANNER_VERSION,
   LLMUnavailableError,
   LLMParseError,
+  analyzeError,
 } from '../services/planner'
 import { getProviderStatus, ProviderError } from '../lib/providers'
+import { getUserRules, getProjectRules, buildRulesBlock, getRepoSnapshot, buildRepoContext } from '../services/memory'
 
 const router = Router()
 
@@ -157,10 +159,27 @@ router.post('/generate', requireAuth, async (req: AuthRequest, res: Response): P
       return
     }
 
+    // Fetch rules and build rulesContext for system prompt injection
+    const [userRules, projectRules] = await Promise.all([
+      getUserRules(req.userId!),
+      getProjectRules(body.projectId),
+    ])
+    const rulesContext = buildRulesBlock(userRules, projectRules) || undefined
+
     // Build request — generate plan
+    // S8-6: Fetch repo snapshot to inject workspace awareness into planning.
+    // Non-fatal — if no snapshot exists yet, repoContext is simply omitted.
+    let planRepoContext: string | undefined
+    try {
+      const planSnapshot = await getRepoSnapshot(body.projectId)
+      if (planSnapshot) planRepoContext = buildRepoContext(planSnapshot)
+    } catch { /* non-fatal */ }
+
     const { plan: planOutput, metadata } = await generatePlan({
       userRequest,
+      repoContext: planRepoContext,
       chatHistory: body.chatHistory,
+      rulesContext,
     })
 
     // Persist the plan
@@ -430,6 +449,33 @@ router.post('/test/blackbox-rotation', requireAuth, async (_req: AuthRequest, re
     })
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
+    res.status(500).json({ ok: false, error: message })
+  }
+})
+
+// ─── POST /api/planner/test/analyze-error ────────────────────
+// S9 E2E test endpoint — calls analyzeError() with a provided error string.
+// Auth-gated. Works in production (no sensitive side-effects).
+// Returns the full ErrorAnalysis object + which path was used (llm | heuristic).
+
+router.post('/test/analyze-error', requireAuth, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { rawError } = req.body ?? {}
+    if (!rawError || typeof rawError !== 'string' || rawError.trim().length === 0) {
+      res.status(400).json({ error: 'rawError (string) is required' })
+      return
+    }
+    const t0 = Date.now()
+    const analysis = await analyzeError(rawError.trim())
+    const durationMs = Date.now() - t0
+    res.json({
+      ok: true,
+      analysis,
+      durationMs,
+    })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    console.error('[Planner] analyze-error test endpoint error:', err)
     res.status(500).json({ ok: false, error: message })
   }
 })

@@ -1,16 +1,23 @@
 /**
- * Scaffold Service — Phase 3B
+ * Scaffold Service — Legacy fallback (Phase 3B)
  *
- * Generates a real, working React + Express application scaffold
- * based on the approved plan's features, techStack, and scope.
+ * NOTE: As of Phase 10, the primary code generator is codeGenerator.ts
+ * (generateProjectFiles). This file is retained as a legacy fallback
+ * and for direct use in tests / tooling.
  *
  * GENERATION MODE: Template-based (not AI-generated)
  * - Files are real, syntactically valid TypeScript/React
  * - Content is derived from plan data (summary, features, techStack)
- * - AI-generated code is Phase 3B+ with OPENAI_API_KEY
+ * - Uses premium dark-theme design system (designSystem.ts)
  *
  * Each file returned has actual content — no empty files, no placeholders.
  */
+
+import {
+  detectProjectType,
+  getPremiumIndexCss,
+  getPremiumTailwindConfig,
+} from './designSystem'
 
 // ─── Types ────────────────────────────────────────────────────
 
@@ -387,37 +394,9 @@ export default App
 `
 }
 
-function genIndexCss(): string {
-  return `@tailwind base;
-@tailwind components;
-@tailwind utilities;
-
-:root {
-  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
-  line-height: 1.5;
-  font-weight: 400;
-  color-scheme: light dark;
-  color: rgba(255, 255, 255, 0.87);
-  background-color: #242424;
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-}
-
-body {
-  margin: 0;
-  min-width: 320px;
-  min-height: 100vh;
-}
-
-#root {
-  max-width: 1280px;
-  margin: 0 auto;
-  padding: 2rem;
-  text-align: center;
-}
-`
+function genIndexCss(input: ScaffoldInput): string {
+  const projectType = detectProjectType(input.frontendScope, input.summary, input.features)
+  return getPremiumIndexCss(projectType)
 }
 
 function genHeaderComponent(input: ScaffoldInput): string {
@@ -1031,19 +1010,9 @@ function genEnvExample(input: ScaffoldInput): string {
   return lines.join('\n') + '\n'
 }
 
-function genTailwindConfig(): string {
-  return `/** @type {import('tailwindcss').Config} */
-export default {
-  content: [
-    './index.html',
-    './src/**/*.{js,ts,jsx,tsx}',
-  ],
-  theme: {
-    extend: {},
-  },
-  plugins: [],
-}
-`
+function genTailwindConfig(input: ScaffoldInput): string {
+  const projectType = detectProjectType(input.frontendScope, input.summary, input.features)
+  return getPremiumTailwindConfig(projectType)
 }
 
 function genPostcssConfig(): string {
@@ -1098,8 +1067,8 @@ export function generateScaffold(input: ScaffoldInput): ScaffoldResult {
   })
   files.push({
     relativePath: 'tailwind.config.js',
-    content: genTailwindConfig(),
-    description: 'Tailwind CSS configuration',
+    content: genTailwindConfig(input),
+    description: 'Premium Tailwind CSS configuration (dark theme)',
   })
   files.push({
     relativePath: 'postcss.config.js',
@@ -1130,8 +1099,8 @@ export function generateScaffold(input: ScaffoldInput): ScaffoldResult {
   })
   files.push({
     relativePath: 'src/index.css',
-    content: genIndexCss(),
-    description: 'Global CSS with Tailwind directives',
+    content: genIndexCss(input),
+    description: 'Global CSS with premium dark-theme design system',
   })
   files.push({
     relativePath: 'src/lib/api.ts',

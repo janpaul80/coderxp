@@ -15,6 +15,11 @@ import { z } from 'zod'
 import { Prisma } from '@prisma/client'
 import { completeJSON, complete, getProviderStatus, isProviderAvailable, ProviderError } from '../lib/providers'
 import { prisma } from '../lib/prisma'
+import {
+  generateProductIntelligence,
+  buildProductIntelligenceContext,
+  type ProductIntelligence,
+} from './productIntelligence'
 
 // Re-export ProviderError under legacy names so routes/planner.ts keeps working
 export { ProviderError as LLMUnavailableError, ProviderError as LLMParseError }
@@ -32,6 +37,7 @@ export type PlannerIntent =
   | 'greeting'
   | 'question'
   | 'modification'
+  | 'continuation'
 
 const intentSchema = z.object({
   intent: z.enum([
@@ -41,45 +47,74 @@ const intentSchema = z.object({
     'greeting',
     'question',
     'modification',
+    'continuation',
   ]),
   confidence: z.number().min(0).max(1),
   reason: z.string(),
 })
 
 export async function classifyIntent(userMessage: string): Promise<PlannerIntent> {
+  // Fast-path: heuristic can often classify without an AI call at all.
+  // If the heuristic returns a high-confidence result (greeting, clear build verb, etc.)
+  // skip the AI call entirely to save 5-30 seconds of latency.
+  const heuristicResult = heuristicClassify(userMessage)
+  if (heuristicResult === 'greeting') return 'greeting'
+
   if (!isProviderAvailable('openrouter') && !isProviderAvailable('openclaw')) {
-    return heuristicClassify(userMessage)
+    return heuristicResult
   }
 
+  // AI classification with a hard 8-second timeout.
+  // If the provider is cold or slow, we fall back to the heuristic result
+  // rather than making the user wait indefinitely.
   try {
-    const result = await completeJSON({
+    const aiPromise = completeJSON({
       role: 'planner',
       schema: intentSchema,
       systemPrompt: `You are an intent classifier for an AI app builder called CodedXP.
 Classify the user's message into exactly one of these intents:
 
 - build_request: User wants to BUILD a NEW app, website, tool, or software product from scratch
-- fix_request: User is COMPLAINING about something missing, broken, or wrong in the current build (e.g. "the pricing section is missing", "the footer is broken", "it doesn't have a contact form", "add a testimonials section", "the login page is missing")
+- fix_request: User is COMPLAINING about something missing, broken, wrong, or not visible in the current build (e.g. "the pricing section is missing", "the footer is broken", "it doesn't have a contact form", "add a testimonials section", "the login page is missing", "i don't see anything", "the preview is blank", "nothing is showing", "i can't see the app", "the preview isn't working", "it's not showing anything", "the page is empty", "nothing loaded")
+- continuation: User wants to ADD NEW PAGES or FEATURES to an EXISTING completed build (e.g. "add a blog page", "add a settings page", "extend the app with a notifications page", "add more pages to the existing build")
 - modification: User wants to MODIFY or REFINE an existing PLAN (before building starts)
 - clarification_needed: Message is too vague to act on (e.g. "help me", "build something", "do something")
 - greeting: Simple greeting or social message (hi, hello, thanks, etc.)
 - question: User is asking a QUESTION about capabilities, process, or general information — NOT requesting a build or fix
 
 IMPORTANT RULES:
+- "continuation" takes priority when the user explicitly wants to ADD NEW PAGES/FEATURES to an already-built project
 - "fix_request" takes priority over "build_request" when the user mentions something is missing, broken, wrong, or incomplete in an existing build
 - "question" should be used for conversational messages that don't require a plan
 - Only use "build_request" when the user clearly wants to start building something new
+- Phrases like "add X page", "extend with X", "add a new section to the existing build", "add a new blog page to the existing app", "add a new X page to the existing project" → continuation
 - Phrases like "add X", "it's missing X", "where is X", "X is broken", "X doesn't work" → fix_request
 - Phrases like "build me", "create a", "make a", "I want to build" → build_request
+
+CONTINUATION vs FIX_REQUEST disambiguation:
+- If the message contains "to the existing app/build/project" → ALWAYS continuation
+- If the message contains "add a new X page" (where X is a page type like blog, settings, profile) → ALWAYS continuation
+- "add a new blog page to the existing app" → continuation (NOT fix_request)
+- "add a settings page" → continuation
+- "add a blog" → continuation
+- "the blog page is missing" → fix_request
+- "add a testimonials section" → fix_request (section within existing page, not a new page)
 
 Return JSON only: { "intent": "...", "confidence": 0.0-1.0, "reason": "..." }`,
       userPrompt: userMessage,
       temperature: 0.1,
       maxTokens: 200,
     })
+
+    const timeoutPromise = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('classifyIntent timeout (8s)')), 8000)
+    )
+
+    const result = await Promise.race([aiPromise, timeoutPromise])
     return result.parsed.intent
-  } catch {
-    return heuristicClassify(userMessage)
+  } catch (err) {
+    console.warn(`[Planner] classifyIntent AI failed, using heuristic: ${err instanceof Error ? err.message : err}`)
+    return heuristicResult
   }
 }
 
@@ -90,10 +125,34 @@ function heuristicClassify(msg: string): PlannerIntent {
   const greetings = ['hello', 'hi', 'hey', 'yo', 'sup', 'hiya', 'good morning', 'good evening', 'thanks', 'thank you', 'ok', 'okay', 'cool', 'great', 'awesome']
   if (greetings.some(g => lower === g || lower === g + '!' || lower === g + '.')) return 'greeting'
 
+  // Continuation patterns — check BEFORE fix patterns
+  const continuationPatterns = [
+    'add a new page', 'add new page', 'add a page', 'new page to',
+    'extend the app', 'extend with', 'extend it with', 'add more pages',
+    'add another page', 'add a blog', 'add a settings', 'add a profile page',
+    'add a notifications', 'add a dashboard page', 'add a new feature page',
+    'add pages to', 'add to the existing', 'extend the existing',
+    // Patterns for "add a new X page to the existing app/build/project"
+    'to the existing app', 'to the existing build', 'to the existing project',
+    'add a new blog', 'add a new settings', 'add a new profile',
+    'add a new dashboard', 'add a new notifications', 'add a new page to',
+    'new page to the existing', 'add a new feature to',
+  ]
+  if (continuationPatterns.some(p => lower.includes(p))) return 'continuation'
+
   // Fix/complaint patterns — check BEFORE build patterns
   const fixPatterns = [
     'missing', 'broken', 'not working', "doesn't have", "doesn't work",
     "didn't add", "forgot", "forgot to", "where is the", "where's the",
+    // Preview-blank complaint patterns
+    "don't see anything", "dont see anything", "can't see anything", "cant see anything",
+    "can't see the", "cannot see the", "can't see it", "can't see my",
+    "nothing is showing", "nothing showing", "not showing", "preview is blank",
+    "preview blank", "blank preview", "page is empty", "nothing loaded",
+    "preview not working", "preview isn't working", "preview doesn't work",
+    "i see nothing", "see nothing", "shows nothing", "showing nothing",
+    "it's empty", "its empty", "all i see is white", "white screen",
+    "black screen", "blank screen", "blank page",
     'add a ', 'add the ', 'add more', 'it needs', 'needs a ', 'needs the ',
     'fix the', 'fix this', 'repair', 'the page is', 'section is missing',
     'no footer', 'no header', 'no pricing', 'no contact', 'no navbar',
@@ -195,11 +254,18 @@ COMPLETENESS RULES (CRITICAL — incomplete builds are a product failure):
 - NEVER omit standard page sections — always include navigation, footer, and all expected sections
 - Each page listed in frontendScope MUST be fully implemented with all its sections
 
+INTEGRATION DETECTION RULES (CRITICAL — missing integrations break the build):
+- If the user mentions "Supabase" anywhere → integrations MUST include "Supabase"
+- If the user mentions "Stripe" anywhere → integrations MUST include "Stripe"
+- If the user mentions "OAuth", "Google login", "GitHub login" with Supabase → integrations MUST include "Supabase"
+- If the user mentions "subscription", "billing", "payment", "checkout" → integrations MUST include "Stripe"
+- integrations array must EXACTLY match what the user requested — never leave it empty if a service was mentioned
+
 GENERAL RULES:
 - features: list of user-facing features (2-10 items)
 - frontendScope: list of pages/components to build (3-15 items) — be SPECIFIC and COMPLETE
 - backendScope: list of API routes/services to build (0-15 items, empty array if frontend-only)
-- integrations: list of third-party services (empty array if none)
+- integrations: list of third-party services (empty array ONLY if truly none mentioned)
 - executionSteps: ordered build steps (3-10 items)
 - estimatedComplexity: low (1-3 features), medium (4-7 features), high (8+ features or complex integrations)
 - Return ONLY the JSON object, no markdown, no explanation`
@@ -212,17 +278,130 @@ export interface GeneratePlanInput {
   projectName?: string
   /** Structured memory context injected from ProjectMemory + UserMemory. High-signal, compact. */
   memoryContext?: string
+  /** Explicit user rules block — injected into system prompt at highest priority. */
+  rulesContext?: string
+  /** S8-6: Repo snapshot context — injected to prevent duplicate components/routes/endpoints. */
+  repoContext?: string
 }
 
 export interface GeneratePlanResult {
   plan: PlanOutput
   metadata: PlannerMetadata
+  /** Product intelligence generated alongside the plan (null if AI unavailable) */
+  productIntelligence?: ProductIntelligence | null
 }
+
+export interface RepairPlanOutput {
+  filesToRepair: string[]
+  repairReason: string
+  repairSummary: string
+}
+
+const repairPlanSchema = z.object({
+  filesToRepair: z.array(z.string().min(1)).min(1).max(8),
+  repairReason: z.string().min(3).max(500),
+  repairSummary: z.string().min(3).max(200),
+})
 
 function inferComplexity(featureCount: number, hasIntegrations: boolean): 'low' | 'medium' | 'high' {
   if (featureCount >= 8 || hasIntegrations) return 'high'
   if (featureCount >= 4) return 'medium'
   return 'low'
+}
+
+function inferFilesFromComplaint(complaint: string, fileTree: string[]): string[] {
+  const lower = complaint.toLowerCase()
+  const picks: string[] = []
+
+  const rules: Array<{ keywords: string[]; patterns: string[] }> = [
+    { keywords: ['pricing', 'price', 'plan', 'plans'], patterns: ['src/pages/Pricing.tsx', '/Pricing', '/pricing'] },
+    { keywords: ['contact', 'cta', 'form'], patterns: ['src/pages/Contact.tsx', '/Contact', '/contact'] },
+    { keywords: ['testimonial', 'review', 'social proof'], patterns: ['src/pages/Testimonials.tsx', '/Testimonials', '/testimonials'] },
+    { keywords: ['about'], patterns: ['src/pages/About.tsx', '/About', '/about'] },
+    { keywords: ['blog', 'article', 'post'], patterns: ['src/pages/Blog.tsx', '/Blog', '/blog'] },
+    { keywords: ['faq'], patterns: ['src/pages/FAQ.tsx', '/FAQ', '/faq'] },
+    { keywords: ['home', 'hero', 'landing', 'footer', 'header', 'navbar', 'navigation'], patterns: ['src/pages/Home.tsx', 'src/components/Header.tsx'] },
+    { keywords: ['login', 'sign in'], patterns: ['src/pages/Login.tsx'] },
+    { keywords: ['register', 'signup', 'sign up'], patterns: ['src/pages/Register.tsx'] },
+    { keywords: ['dashboard', 'admin', 'panel'], patterns: ['src/pages/Dashboard.tsx'] },
+    { keywords: ['route', 'routing', 'nav', 'menu'], patterns: ['src/App.tsx'] },
+  ]
+
+  for (const rule of rules) {
+    if (rule.keywords.some(k => lower.includes(k))) {
+      const matched = fileTree.filter(fp => rule.patterns.some(p => fp.includes(p)))
+      picks.push(...matched)
+    }
+  }
+
+  const includesPage = picks.some(p => p.startsWith('src/pages/'))
+  if (includesPage && fileTree.includes('src/App.tsx')) {
+    picks.push('src/App.tsx')
+  }
+
+  const deduped = Array.from(new Set(picks))
+  if (deduped.length > 0) return deduped.slice(0, 8)
+
+  const genericFallback = ['src/App.tsx', 'src/pages/Home.tsx', 'src/components/Header.tsx']
+    .filter(fp => fileTree.includes(fp))
+  return genericFallback.length > 0 ? genericFallback : fileTree.slice(0, 3)
+}
+
+export async function generateRepairPlan(params: {
+  complaint: string
+  fileTree: string[]
+  projectSummary: string
+}): Promise<RepairPlanOutput> {
+  const fallbackFiles = inferFilesFromComplaint(params.complaint, params.fileTree)
+  const fallback: RepairPlanOutput = {
+    filesToRepair: fallbackFiles,
+    repairReason: params.complaint.slice(0, 500),
+    repairSummary: `Repair requested: ${params.complaint.slice(0, 120)}`,
+  }
+
+  if (!isProviderAvailable('openrouter') && !isProviderAvailable('openclaw') && !isProviderAvailable('blackbox')) {
+    return fallback
+  }
+
+  try {
+    const result = await completeJSON({
+      role: 'planner',
+      schema: repairPlanSchema,
+      systemPrompt: `You are CodedXP's targeted repair planner.
+Given a user complaint and a workspace file tree, select ONLY the files that must be regenerated.
+Rules:
+- Prefer minimal edits (1-5 files usually).
+- Preserve existing project context; do NOT suggest full rebuild.
+- Include src/App.tsx if route/page wiring is likely affected.
+- Return strict JSON only:
+{
+  "filesToRepair": ["src/pages/Pricing.tsx", "src/App.tsx"],
+  "repairReason": "why these files are affected",
+  "repairSummary": "short one-line repair summary"
+}`,
+      userPrompt: `Project summary: ${params.projectSummary}
+
+User complaint:
+${params.complaint}
+
+Workspace files:
+${params.fileTree.slice(0, 200).join('\n')}
+
+Return the minimal files to regenerate.`,
+      temperature: 0.1,
+      maxTokens: 500,
+      retries: 1,
+    })
+
+    const existing = result.parsed.filesToRepair.filter(f => params.fileTree.includes(f))
+    return {
+      filesToRepair: existing.length > 0 ? existing : fallbackFiles,
+      repairReason: result.parsed.repairReason,
+      repairSummary: result.parsed.repairSummary,
+    }
+  } catch {
+    return fallback
+  }
 }
 
 function buildFallbackPlanFromRequest(userRequest: string): PlanOutput {
@@ -279,6 +458,7 @@ function buildFallbackPlanFromRequest(userRequest: string): PlanOutput {
 
   const integrations: string[] = []
   if (lc.includes('stripe')) integrations.push('Stripe')
+  if (lc.includes('supabase')) integrations.push('Supabase')
   if (lc.includes('email')) integrations.push('Email provider')
   if (lc.includes('upload')) integrations.push('File storage')
 
@@ -327,23 +507,47 @@ export async function generatePlan(input: GeneratePlanInput): Promise<GeneratePl
     ? `\n\n${input.memoryContext}\n\nUse the above memory context to inform your plan. Respect confirmed stack decisions, known integrations, and approved project direction. Do not contradict prior decisions unless the user explicitly requests a change.`
     : ''
 
-  const userPrompt = `User request: "${input.userRequest}"${contextBlock}${memoryBlock}
+  // S8-6: Inject repo snapshot so the planner avoids duplicating existing components/routes/endpoints.
+  const repoBlock = input.repoContext
+    ? `\n\n${input.repoContext}`
+    : ''
+
+  const userPrompt = `User request: "${input.userRequest}"${contextBlock}${memoryBlock}${repoBlock}
 
 Generate a complete implementation plan for this app. Remember: ALL standard page sections must be included — never omit hero, features, pricing, testimonials, contact, or footer sections for landing pages.`
+
+  // Prepend rules to system prompt if present (highest priority)
+  const effectiveSystemPrompt = input.rulesContext
+    ? `${input.rulesContext}\n\n---\n\n${PLANNER_SYSTEM_PROMPT}`
+    : PLANNER_SYSTEM_PROMPT
 
   const start = Date.now()
   let metadata: PlannerMetadata
 
+  // Run product intelligence generation in parallel with plan generation.
+  // Non-blocking — a failure here does not prevent the plan from succeeding.
+  const productIntelligencePromise = generateProductIntelligence(
+    input.userRequest,
+    input.projectName,
+    input.memoryContext,
+  ).catch((err) => {
+    console.warn('[Planner] Product intelligence generation failed (non-blocking):', err instanceof Error ? err.message : err)
+    return null
+  })
+
   try {
-    const result = await completeJSON({
-      role: 'planner',
-      schema: planOutputSchema,
-      systemPrompt: PLANNER_SYSTEM_PROMPT,
-      userPrompt,
-      temperature: 0.4,
-      maxTokens: 2500,
-      retries: 2,
-    })
+    const [result, productIntelligence] = await Promise.all([
+      completeJSON({
+        role: 'planner',
+        schema: planOutputSchema,
+        systemPrompt: effectiveSystemPrompt,
+        userPrompt,
+        temperature: 0.4,
+        maxTokens: 2500,
+        retries: 2,
+      }),
+      productIntelligencePromise,
+    ])
 
     metadata = {
       plannerVersion: PLANNER_VERSION,
@@ -357,7 +561,7 @@ Generate a complete implementation plan for this app. Remember: ALL standard pag
       rawResponseLength: result.rawResponse?.length ?? 0,
     }
 
-    return { plan: result.parsed, metadata }
+    return { plan: result.parsed, metadata, productIntelligence }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     const status = getProviderStatus()
@@ -365,6 +569,7 @@ Generate a complete implementation plan for this app. Remember: ALL standard pag
 
     if (err instanceof ProviderError && err.code === 'PARSE_ERROR') {
       const fallbackPlan = buildFallbackPlanFromRequest(input.userRequest)
+      const piResult = await productIntelligencePromise
       metadata = {
         plannerVersion: PLANNER_VERSION,
         provider: `${status.roleRouting.planner}:fallback`,
@@ -377,7 +582,7 @@ Generate a complete implementation plan for this app. Remember: ALL standard pag
         rawResponseLength: 0,
         error: `Recovered from parse error: ${message}`,
       }
-      return { plan: fallbackPlan, metadata }
+      return { plan: fallbackPlan, metadata, productIntelligence: piResult }
     }
 
     metadata = {
@@ -551,4 +756,181 @@ export async function savePlannerRun(params: {
   } catch (err) {
     console.warn('[Planner] Failed to persist planner run metadata:', err)
   }
+}
+
+// ─── S9-1: Error Analysis ─────────────────────────────────────
+
+/**
+ * Structured analysis of a build failure.
+ * Produced by analyzeError() and surfaced in the chat as an ErrorAnalysisCard.
+ */
+export interface ErrorAnalysis {
+  /** Plain-language explanation of the root cause */
+  rootCause: string
+  /** Classified error type for badge display and routing */
+  errorType: 'npm_install' | 'vite_build' | 'typescript' | 'runtime' | 'unknown'
+  /** Files the AI believes are responsible (may be empty if unknown) */
+  affectedFiles: string[]
+  /** Actionable fix description — used directly as the repair complaint */
+  proposedFix: string
+  /** 0–1 confidence in the analysis */
+  confidence: number
+  /** First 2000 chars of the raw error log */
+  rawError: string
+}
+
+const errorAnalysisSchema = z.object({
+  rootCause: z.string(),
+  errorType: z.enum(['npm_install', 'vite_build', 'typescript', 'runtime', 'unknown']),
+  affectedFiles: z.array(z.string()),
+  proposedFix: z.string(),
+  confidence: z.number().min(0).max(1),
+})
+
+/**
+ * Heuristic fallback — classifies error without LLM.
+ * Used when all AI providers are unavailable.
+ */
+function heuristicAnalyzeError(errorLog: string): ErrorAnalysis {
+  const log = errorLog.toLowerCase()
+  const rawError = errorLog.slice(0, 2000)
+
+  // npm install failures
+  if (log.includes('npm err!') || log.includes('npm error') || log.includes('npm warn') && log.includes('peer dep')) {
+    const peerDepMatch = errorLog.match(/peer dep[^:]*:\s*([^\n]+)/i)
+    const missingMatch = errorLog.match(/cannot find module '([^']+)'/i)
+    const affectedFiles = missingMatch ? [`package.json`] : ['package.json']
+    return {
+      rootCause: peerDepMatch
+        ? `npm install failed due to peer dependency conflict: ${peerDepMatch[1].slice(0, 120)}`
+        : 'npm install failed — likely a missing or incompatible dependency',
+      errorType: 'npm_install',
+      affectedFiles,
+      proposedFix: peerDepMatch
+        ? `Fix peer dependency conflict in package.json: ${peerDepMatch[1].slice(0, 120)}. Remove conflicting version constraints or use a compatible version.`
+        : 'Review package.json dependencies for missing or incompatible packages. Ensure all imports have corresponding entries in dependencies.',
+      confidence: 0.7,
+      rawError,
+    }
+  }
+
+  // TypeScript errors
+  if (log.includes('error ts') || log.includes('typescript') || /\berror\b.*\.tsx?:\d+/.test(log)) {
+    const tsMatch = errorLog.match(/error TS\d+: ([^\n]+)/i)
+    const fileMatch = errorLog.match(/([a-z0-9/_-]+\.tsx?):\d+/i)
+    return {
+      rootCause: tsMatch
+        ? `TypeScript compilation error: ${tsMatch[1].slice(0, 150)}`
+        : 'TypeScript compilation failed — type errors in generated code',
+      errorType: 'typescript',
+      affectedFiles: fileMatch ? [fileMatch[1]] : [],
+      proposedFix: tsMatch
+        ? `Fix TypeScript error: ${tsMatch[1].slice(0, 150)}. Check type annotations, missing imports, and interface mismatches.`
+        : 'Fix TypeScript type errors in the generated source files. Check for missing type imports, incorrect prop types, and undefined variables.',
+      confidence: 0.75,
+      rawError,
+    }
+  }
+
+  // Vite build errors
+  if (log.includes('[vite]') || log.includes('vite') && (log.includes('failed') || log.includes('error'))) {
+    const viteMatch = errorLog.match(/\[vite\][^\n]*error[^\n]*/i) ?? errorLog.match(/error[^\n]*\.(tsx?|jsx?)[^\n]*/i)
+    const fileMatch = errorLog.match(/([a-z0-9/_-]+\.(tsx?|jsx?|css)):\d+/i)
+    return {
+      rootCause: viteMatch
+        ? `Vite build error: ${viteMatch[0].slice(0, 150)}`
+        : 'Vite failed to start or build the project',
+      errorType: 'vite_build',
+      affectedFiles: fileMatch ? [fileMatch[1]] : [],
+      proposedFix: 'Fix the Vite build error. Check for missing imports, invalid JSX syntax, or misconfigured vite.config.ts.',
+      confidence: 0.65,
+      rawError,
+    }
+  }
+
+  // Generic runtime error
+  if (log.includes('cannot find module') || log.includes('module not found')) {
+    const moduleMatch = errorLog.match(/cannot find module '([^']+)'/i) ?? errorLog.match(/module not found[^']*'([^']+)'/i)
+    return {
+      rootCause: moduleMatch
+        ? `Missing module: ${moduleMatch[1]}`
+        : 'A required module could not be found',
+      errorType: 'runtime',
+      affectedFiles: [],
+      proposedFix: moduleMatch
+        ? `Add missing import/dependency: ${moduleMatch[1]}. Ensure it is listed in package.json and the import path is correct.`
+        : 'Check all import paths and ensure all dependencies are listed in package.json.',
+      confidence: 0.8,
+      rawError,
+    }
+  }
+
+  // Unknown
+  return {
+    rootCause: 'Build failed with an unclassified error',
+    errorType: 'unknown',
+    affectedFiles: [],
+    proposedFix: 'Review the build error log and fix any syntax errors, missing imports, or configuration issues in the generated files.',
+    confidence: 0.3,
+    rawError,
+  }
+}
+
+/**
+ * S9-1: Analyze a build error log and produce a structured ErrorAnalysis.
+ *
+ * Uses AI when available for accurate root-cause analysis.
+ * Falls back to heuristic regex classification when all providers are unavailable.
+ *
+ * @param errorLog  Raw error output from npm install / vite / health check
+ * @param repoContext  Optional repo snapshot context (from S8) for better targeting
+ */
+export async function analyzeError(
+  errorLog: string,
+  repoContext?: string
+): Promise<ErrorAnalysis> {
+  const rawError = errorLog.slice(0, 2000)
+
+  // Heuristic fallback when no AI provider is available
+  if (!isProviderAvailable('openrouter') && !isProviderAvailable('openclaw') && !isProviderAvailable('blackbox')) {
+    return heuristicAnalyzeError(errorLog)
+  }
+
+  const repoBlock = repoContext ? `\n\nRepo context:\n${repoContext}` : ''
+
+  try {
+    const result = await completeJSON({
+      role: 'planner',
+      schema: errorAnalysisSchema,
+      systemPrompt: `You are a build error analyst for an AI app builder called CoderXP.
+Given a build error log, identify the root cause and propose a specific, actionable fix.
+
+Rules:
+- rootCause: 1–2 sentences in plain language. No jargon. Explain what went wrong.
+- errorType: classify as npm_install | vite_build | typescript | runtime | unknown
+- affectedFiles: list of file paths mentioned in the error (relative paths, e.g. "src/App.tsx"). Empty array if none.
+- proposedFix: 1–3 sentences. Specific and actionable. This will be used as a repair instruction.
+- confidence: 0.0–1.0 based on how clear the error is
+
+Be concise. Do not repeat the raw error. Focus on the fix.`,
+      userPrompt: `Build error log (first 2000 chars):\n\`\`\`\n${rawError}\n\`\`\`${repoBlock}`,
+      temperature: 0,
+      maxTokens: 400,
+    })
+
+    return {
+      rootCause: result.parsed.rootCause,
+      errorType: result.parsed.errorType,
+      affectedFiles: result.parsed.affectedFiles,
+      proposedFix: result.parsed.proposedFix,
+      confidence: result.parsed.confidence,
+      rawError,
+    }
+  } catch {
+    // LLM call failed — fall back to heuristic
+    return heuristicAnalyzeError(errorLog)
+  }
+
+  // TypeScript exhaustiveness guard — unreachable but satisfies control-flow analysis
+  return heuristicAnalyzeError(errorLog)
 }

@@ -14,6 +14,12 @@ import type {
   BrowserSession,
   BrowserAction,
   BrowserSessionSource,
+  AgentStatusPayload,
+  FileChangePayload,
+  AgentProgressSnapshot,
+  AgentRole,
+  AgentTaskStatus,
+  PipelineStatus,
 } from '@/types'
 
 // ─── State ────────────────────────────────────────────────────
@@ -48,6 +54,14 @@ interface AppStore {
   pendingCredentialRequest: CredentialRequest | null
   setPendingCredential: (req: CredentialRequest | null) => void
 
+  // Pending continuation suggestion (from job:continuation_suggested)
+  pendingContinuationSuggestion: { jobId: string; request: string } | null
+  setPendingContinuationSuggestion: (data: { jobId: string; request: string } | null) => void
+
+  // Pending repair suggestion (from job:repair_suggested)
+  pendingRepairSuggestion: { jobId: string; reason: string; complaint?: string; canAutoRepair: boolean } | null
+  setPendingRepairSuggestion: (data: { jobId: string; reason: string; complaint?: string; canAutoRepair: boolean } | null) => void
+
   // Browser control state
   pendingBrowserApproval: {
     sessionId: string
@@ -70,9 +84,41 @@ interface AppStore {
   updateBrowserAction: (actionId: string, patch: Partial<BrowserAction>) => void
   clearBrowserSession: () => void
 
+  // Streaming file token state (populated during AI code generation, cleared on complete/repair)
+  streamingFile: { path: string; content: string } | null
+  appendStreamingFileToken: (path: string, delta: string) => void
+  clearStreamingFile: () => void
+
   // Build summary (populated on job:complete, cleared on resetToIdle)
   buildSummary: BuildSummary | null
   setBuildSummary: (summary: BuildSummary | null) => void
+
+  // ── Test results & security audit (Sprint 19) ──────────────
+  testResults: {
+    numTests: number; numPassed: number; numFailed: number
+    success: boolean; coverage: import('@/types').TestCoverageSummary | null
+    failures: Array<{ suiteName: string; testName: string; error: string; filePath: string }>
+  } | null
+  setTestResults: (results: NonNullable<AppState['testResults']> | null) => void
+  securityAudit: {
+    securityScore: number; counts: Record<string, number>
+    findings: import('@/types').SecurityFinding[]
+    vulnerabilities: Array<{ name: string; version: string; severity: string; description: string }>
+  } | null
+  setSecurityAudit: (audit: NonNullable<AppState['securityAudit']> | null) => void
+
+  // ── Multi-agent system state ─────────────────────────────
+  agentPipeline: PipelineStatus
+  agentStatuses: Record<string, AgentTaskStatus>
+  agentStatusLog: AgentStatusPayload[]
+  fileChanges: FileChangePayload[]
+  agentSnapshot: AgentProgressSnapshot | null
+  activeAgentRole: AgentRole | null
+  setAgentPipeline: (status: PipelineStatus) => void
+  pushAgentStatus: (payload: AgentStatusPayload) => void
+  pushFileChange: (payload: FileChangePayload) => void
+  setAgentSnapshot: (snapshot: AgentProgressSnapshot) => void
+  resetAgentState: () => void
 
   // Global loading
   isGlobalLoading: boolean
@@ -179,6 +225,16 @@ export const useAppStore = create<AppStore>()(
       setPendingCredential: (req) =>
         set({ pendingCredentialRequest: req }, false, 'setPendingCredential'),
 
+      // ── Pending continuation suggestion ───────────────────
+      pendingContinuationSuggestion: null,
+      setPendingContinuationSuggestion: (data) =>
+        set({ pendingContinuationSuggestion: data }, false, 'setPendingContinuationSuggestion'),
+
+      // ── Pending repair suggestion ─────────────────────────
+      pendingRepairSuggestion: null,
+      setPendingRepairSuggestion: (data) =>
+        set({ pendingRepairSuggestion: data }, false, 'setPendingRepairSuggestion'),
+
       // ── Browser control ───────────────────────────────────
       pendingBrowserApproval: null,
       setPendingBrowserApproval: (data) =>
@@ -216,10 +272,103 @@ export const useAppStore = create<AppStore>()(
           'clearBrowserSession'
         ),
 
+      // ── Streaming file tokens ─────────────────────────────
+      streamingFile: null,
+      appendStreamingFileToken: (path, delta) =>
+        set(
+          (state) => ({
+            streamingFile: {
+              path,
+              content: state.streamingFile?.path === path
+                ? (state.streamingFile.content + delta)
+                : delta,
+            },
+          }),
+          false,
+          'appendStreamingFileToken'
+        ),
+      clearStreamingFile: () =>
+        set({ streamingFile: null }, false, 'clearStreamingFile'),
+
       // ── Build summary ─────────────────────────────────────
       buildSummary: null,
       setBuildSummary: (summary) =>
         set({ buildSummary: summary }, false, 'setBuildSummary'),
+
+      // ── Test results & security audit ──────────────────────
+      testResults: null,
+      setTestResults: (results) =>
+        set({ testResults: results }, false, 'setTestResults'),
+      securityAudit: null,
+      setSecurityAudit: (audit) =>
+        set({ securityAudit: audit }, false, 'setSecurityAudit'),
+
+      // ── Multi-agent system ─────────────────────────────────
+      agentPipeline: 'idle' as PipelineStatus,
+      agentStatuses: {} as Record<string, AgentTaskStatus>,
+      agentStatusLog: [] as AgentStatusPayload[],
+      fileChanges: [] as FileChangePayload[],
+      agentSnapshot: null as AgentProgressSnapshot | null,
+      activeAgentRole: null as AgentRole | null,
+
+      setAgentPipeline: (status) =>
+        set({ agentPipeline: status }, false, 'setAgentPipeline'),
+
+      pushAgentStatus: (payload) =>
+        set(
+          (state) => {
+            const log = [...state.agentStatusLog, payload].slice(-100)
+            const statuses = { ...state.agentStatuses }
+            let activeRole = state.activeAgentRole
+
+            if (payload.type === 'pipeline') {
+              return {
+                agentStatusLog: log,
+                agentPipeline: payload.status as PipelineStatus,
+              }
+            }
+            if (payload.type === 'agent' && payload.agent) {
+              statuses[payload.agent] = payload.status as AgentTaskStatus
+              if (payload.status === 'running') {
+                activeRole = payload.agent as AgentRole
+              }
+              return {
+                agentStatusLog: log,
+                agentStatuses: statuses,
+                activeAgentRole: activeRole,
+              }
+            }
+            return { agentStatusLog: log }
+          },
+          false,
+          'pushAgentStatus'
+        ),
+
+      pushFileChange: (payload) =>
+        set(
+          (state) => ({
+            fileChanges: [...state.fileChanges, payload].slice(-200),
+          }),
+          false,
+          'pushFileChange'
+        ),
+
+      setAgentSnapshot: (snapshot) =>
+        set({ agentSnapshot: snapshot }, false, 'setAgentSnapshot'),
+
+      resetAgentState: () =>
+        set(
+          {
+            agentPipeline: 'idle' as PipelineStatus,
+            agentStatuses: {},
+            agentStatusLog: [],
+            fileChanges: [],
+            agentSnapshot: null,
+            activeAgentRole: null,
+          },
+          false,
+          'resetAgentState'
+        ),
 
       // ── Global loading ────────────────────────────────────
       isGlobalLoading: false,
@@ -346,10 +495,21 @@ export const useAppStore = create<AppStore>()(
             activePlan: null,
             activeJob: null,
             buildSummary: null,
+            testResults: null,
+            securityAudit: null,
+            streamingFile: null,
             pendingCredentialRequest: null,
+            pendingContinuationSuggestion: null,
+            pendingRepairSuggestion: null,
             pendingBrowserApproval: null,
             activeBrowserSession: null,
             browserActions: [],
+            agentPipeline: 'idle' as PipelineStatus,
+            agentStatuses: {},
+            agentStatusLog: [],
+            fileChanges: [],
+            agentSnapshot: null,
+            activeAgentRole: null,
             rightPanel: {
               mode: 'idle',
               activeJobId: null,

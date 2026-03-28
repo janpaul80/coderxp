@@ -20,12 +20,16 @@ export type PanelState =
 
 // ─── Auth ─────────────────────────────────────────────────────
 
+export type PlanTier = 'free' | 'pro' | 'team' | 'enterprise'
+
 export interface User {
   id: string
   email: string
   name: string
   avatarUrl?: string
   createdAt: string
+  credits?: number
+  plan?: PlanTier
 }
 
 export interface AuthState {
@@ -72,6 +76,9 @@ export type MessageType =
   | 'repair_complete'
   | 'credential_request'
   | 'file_upload'
+  | 'continuation_suggested'
+  | 'repair_suggested'
+  | 'error_analysis'
 
 export interface Message {
   id: string
@@ -93,6 +100,14 @@ export interface MessageMetadata {
   approvalStatus?: 'pending' | 'approved' | 'rejected' | 'modified'
   buildProgress?: BuildProgress
   errorDetails?: ErrorDetails
+  /** Populated for continuation_suggested messages */
+  continuationSuggestion?: { jobId: string; request: string }
+  /** Populated for repair_suggested messages */
+  repairSuggestion?: { jobId: string; complaint?: string; canAutoRepair: boolean }
+  /** Populated for error_analysis messages (S9) */
+  errorAnalysis?: ErrorAnalysis
+  /** Auto-repair attempt number (1-based) */
+  autoRepairAttempt?: number
 }
 
 export interface Chat {
@@ -173,6 +188,7 @@ export interface Job {
   completedAt?: string
   previewUrl?: string
   previewPort?: number
+  previewPid?: number
   previewStatus?: string
   error?: string
   errorDetails?: string
@@ -287,6 +303,33 @@ export interface CredentialField {
   value?: string
 }
 
+// ─── Error Analysis (S9 — AI-Native Debugger) ────────────────
+
+export type ErrorAnalysisType =
+  | 'syntax_error'
+  | 'import_error'
+  | 'type_error'
+  | 'runtime_error'
+  | 'config_error'
+  | 'dependency_error'
+  | 'build_error'
+  | 'unknown'
+
+export interface ErrorAnalysis {
+  /** Plain-language root cause explanation */
+  rootCause: string
+  /** Classified error category */
+  errorType: ErrorAnalysisType
+  /** Files likely responsible for the error */
+  affectedFiles: string[]
+  /** Concrete fix description used as repair complaint */
+  proposedFix: string
+  /** AI confidence 0–1 */
+  confidence: number
+  /** Raw error output (truncated) */
+  rawError: string
+}
+
 // ─── Error ────────────────────────────────────────────────────
 
 export interface ErrorDetails {
@@ -303,6 +346,26 @@ export interface ErrorDetails {
   errorDetails?: string
 }
 
+// ─── Testing & Security Types ──────────────────────────────────
+
+export interface TestCoverageSummary {
+  statements: { total: number; covered: number; percent: number }
+  branches: { total: number; covered: number; percent: number }
+  functions: { total: number; covered: number; percent: number }
+  lines: { total: number; covered: number; percent: number }
+}
+
+export interface SecurityFinding {
+  ruleId: string
+  category: string
+  severity: 'critical' | 'high' | 'medium' | 'low' | 'info'
+  message: string
+  filePath: string
+  line: number
+  snippet: string
+  fix: string
+}
+
 // ─── Socket Events ────────────────────────────────────────────
 // socket.io-client requires callback signatures, not raw data types
 
@@ -315,8 +378,29 @@ export interface ServerToClientEvents {
   'job:created': (job: Job) => void
   'job:updated': (job: Job) => void
   'job:log': (data: { jobId: string; log?: JobLog; msg?: string }) => void
-  'job:complete': (data: { jobId: string; previewUrl?: string; url?: string }) => void
+  'job:complete': (data: {
+    jobId: string
+    previewUrl?: string
+    url?: string
+    fileCount?: number
+    totalBytes?: number
+    techStack?: string[]
+    keyFiles?: string[]
+    integrations?: string[]
+    buildTimestamp?: string
+  }) => void
   'job:failed': (data: { jobId: string; error: { code: string; message: string; category?: string; retryCount?: number } }) => void
+  'job:file_token': (data: { jobId: string; path: string; delta: string }) => void
+  'job:targeted_repair': (data: { jobId: string; filesToRepair: string[]; repairSummary: string; previewUrl?: string }) => void
+  'job:continuation_suggested': (data: { jobId: string; request: string; canContinue: boolean }) => void
+  'job:repair_suggested': (data: { jobId: string; reason: string; complaint?: string; canAutoRepair: boolean }) => void
+  'job:continuation_complete': (data: { jobId: string; previewUrl?: string }) => void
+  'job:error_analysis': (data: {
+    jobId: string
+    errorAnalysis: ErrorAnalysis
+    attempt: number
+    autoRepairTriggered: boolean
+  }) => void
   'repair:started': (data: { jobId: string }) => void
   'repair:complete': (data: { jobId: string; fixed: boolean }) => void
   'preview:ready': (data: { jobId: string; url: string }) => void
@@ -337,6 +421,33 @@ export interface ServerToClientEvents {
   'browser:session_complete': (data: { sessionId: string }) => void
   'browser:session_terminated': (data: { sessionId: string; reason: string }) => void
   'error': (data: { message: string; code?: string }) => void
+  // ── Multi-agent system events ──
+  'agent:status': (payload: AgentStatusPayload) => void
+  'agent:fileChange': (payload: FileChangePayload) => void
+  'agent:snapshot': (snapshot: AgentProgressSnapshot) => void
+  'job:test_results': (data: {
+    jobId: string
+    numTests: number
+    numPassed: number
+    numFailed: number
+    success: boolean
+    coverage: TestCoverageSummary | null
+    failures: Array<{ suiteName: string; testName: string; error: string; filePath: string }>
+  }) => void
+  'job:security_audit': (data: {
+    jobId: string
+    securityScore: number
+    counts: Record<string, number>
+    findings: Array<SecurityFinding>
+    vulnerabilities: Array<{ name: string; version: string; severity: string; description: string }>
+  }) => void
+  'job:refactor_analysis': (data: {
+    jobId: string
+    smells: Array<{ type: string; count: number; severity: string }>
+    plans: Array<{ id: string; title: string; risk: string; affectedFiles: number }>
+    dependencies: { outdated: number; critical: number }
+    migrations: Array<{ id: string; name: string }>
+  }) => void
 }
 
 export interface ClientToServerEvents {
@@ -350,6 +461,9 @@ export interface ClientToServerEvents {
   'browser:deny': (data: { sessionId: string }) => void
   'browser:terminate': (data: { sessionId: string }) => void
   'job:cancel': (data: { jobId: string }) => void
+  'job:repair': (data: { jobId: string }) => void
+  'job:continuation_approve': (data: { existingJobId: string; request: string }) => void
+  'job:targeted_repair': (data: { jobId: string; complaint: string }) => void
   'join:project': (data: { projectId: string }) => void
   'leave:project': (data: { projectId: string }) => void
 }
@@ -441,6 +555,95 @@ export interface BrowserAction {
   error?: string
   executedAt?: string
   createdAt: string
+}
+
+// ─── Multi-Agent System ────────────────────────────────────────
+
+export type AgentRole =
+  | 'maxclaw' | 'openclaw'
+  | 'planner' | 'installer' | 'frontend' | 'backend'
+  | 'fixer' | 'qa' | 'deploy'
+  | 'devops' | 'image' | 'android' | 'ios'
+  | 'refactor'
+
+export type AgentLayer = 'orchestration' | 'core' | 'specialist'
+
+export type PipelineStatus =
+  | 'idle' | 'planning' | 'running' | 'recovering' | 'complete' | 'error' | 'cancelled'
+
+export type AgentTaskStatus =
+  | 'idle' | 'running' | 'complete' | 'error' | 'waiting' | 'skipped'
+
+export type PreviewHealthStatus =
+  | 'healthy' | 'recovering' | 'degraded' | 'blocked' | 'starting' | 'stopped'
+
+export type ReleaseStatus =
+  | 'validating' | 'ready' | 'deploying' | 'deployed' | 'failed' | 'idle'
+
+export type AssetStatus =
+  | 'pending' | 'generating' | 'ready' | 'applied' | 'failed'
+
+export interface AgentStatusPayload {
+  type: 'pipeline' | 'agent' | 'preview' | 'release' | 'asset'
+  status: string
+  agent?: AgentRole | string
+  message: string
+  timestamp: string
+  meta?: Record<string, unknown>
+}
+
+export interface FileChangePayload {
+  action: 'created' | 'modified' | 'deleted'
+  filePath: string
+  agent: AgentRole
+  summary: string
+  timestamp: string
+}
+
+export interface AgentProgressSnapshot {
+  pipeline: PipelineStatus
+  agents: Record<string, AgentTaskStatus>
+  preview: PreviewHealthStatus
+  release: ReleaseStatus
+  assets: Array<{ name: string; status: AssetStatus }>
+  progress: { total: number; completed: number; failed: number }
+  startedAt?: string
+  elapsedMs?: number
+}
+
+/** Maps agent role to a user-friendly display label */
+export const AGENT_DISPLAY_NAMES: Record<AgentRole, string> = {
+  maxclaw: 'MaxClaw',
+  openclaw: 'OpenClaw',
+  planner: 'Planner',
+  installer: 'Environment Setup',
+  frontend: 'Frontend Builder',
+  backend: 'Backend Builder',
+  fixer: 'Auto-Fixer',
+  qa: 'QA & Hardening',
+  deploy: 'Deploy',
+  devops: 'DevOps',
+  image: 'Image Generator',
+  android: 'Android',
+  ios: 'iOS',
+  refactor: 'Refactor / Migration',
+}
+
+export const AGENT_STEP_LABELS: Record<AgentRole, string> = {
+  maxclaw: 'Analyzing strategy...',
+  openclaw: 'Orchestrating execution...',
+  planner: 'Planning...',
+  installer: 'Setting up environment...',
+  frontend: 'Building frontend...',
+  backend: 'Building backend...',
+  fixer: 'Fixing issues...',
+  qa: 'Running QA...',
+  deploy: 'Preparing deploy...',
+  devops: 'Configuring infrastructure...',
+  image: 'Generating images...',
+  android: 'Building Android...',
+  ios: 'Building iOS...',
+  refactor: 'Analyzing code quality...',
 }
 
 // ─── Intent Classification ────────────────────────────────────

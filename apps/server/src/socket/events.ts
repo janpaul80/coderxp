@@ -39,6 +39,13 @@ import {
   getCombinedContext,
   recordPlanApproved,
 } from '../services/memory'
+import {
+  createExecutionStrategy,
+  emitPipelineStatus,
+  emitAgentStatus,
+  statusEmitter,
+  resolveActiveAgents,
+} from '../agents'
 
 // ─── Active job statuses (used for one-active-build + concurrent limit guards) ──
 
@@ -144,8 +151,16 @@ export function registerSocketEvents(io: Server) {
           isProviderAvailable('blackbox') ||
           isProviderAvailable('langdock')
         if (anyProviderAvailable) {
-          // Load memory context (non-blocking read — empty string if no memory yet)
-          const memoryContext = await getCombinedContext(chat.project.id, userId)
+          // Load memory context in parallel — don't block the fast path.
+          // If memory loading is slow, handleWithAI proceeds with empty context.
+          let memoryContext = ''
+          try {
+            const memoryPromise = getCombinedContext(chat.project.id, userId)
+            const memoryTimeout = new Promise<string>((resolve) => setTimeout(() => resolve(''), 3000))
+            memoryContext = await Promise.race([memoryPromise, memoryTimeout])
+          } catch {
+            // Non-critical — proceed without memory context
+          }
           await handleWithAI(socket, userId, chatId, chat.project.id, content, chatHistory, memoryContext)
         } else {
           // ── Fallback path (no API key) ────────────────
@@ -238,6 +253,30 @@ export function registerSocketEvents(io: Server) {
 
         // Emit job created
         socket.emit('job:created', job)
+
+        // ── Multi-agent orchestration: create strategy + emit status ──
+        const planSummary = typeof plan.summary === 'string' ? plan.summary : ''
+        const strategy = createExecutionStrategy(planSummary, {
+          mode: 'build',
+          existingPlan: plan as Record<string, unknown>,
+        })
+
+        // Emit pipeline status — user sees "Building" with active agents
+        emitPipelineStatus('running', `Build started: ${strategy.activeAgents.length} agents activated`, {
+          totalTasks: strategy.tasks.length,
+          completedTasks: 0,
+          activeAgents: strategy.activeAgents,
+        })
+
+        // Emit initial agent statuses
+        for (const agentRole of strategy.activeAgents) {
+          emitAgentStatus(agentRole, 'waiting', `${agentRole}: queued`)
+        }
+
+        console.log(
+          `[Orchestrator] Strategy created for job ${job.id}: ` +
+          `${strategy.activeAgents.length} agents, ${strategy.tasks.length} tasks, complexity=${strategy.complexity}`
+        )
 
         // Select worker (primary → failover → local) and dispatch
         const selection = selectWorker(builderQueue!)
@@ -375,6 +414,169 @@ export function registerSocketEvents(io: Server) {
       }
     })
 
+    // ── job:continuation_approve ──────────────────────────
+    // User approves a continuation suggestion (job:continuation_suggested).
+    // Creates a new job in continuation mode — reuses existing workspace,
+    // generates only new pages + updates App.tsx.
+    socket.on('job:continuation_approve', async ({
+      existingJobId,
+      request,
+    }: {
+      existingJobId: string
+      request: string
+    }) => {
+      try {
+        const existingJob = await prisma.job.findUnique({
+          where: { id: existingJobId },
+          include: { project: { select: { userId: true, id: true } } },
+        })
+        if (!existingJob || existingJob.project.userId !== userId) {
+          socket.emit('error', { message: 'Job not found', code: 'JOB_NOT_FOUND' })
+          return
+        }
+        if (existingJob.status !== 'complete') {
+          socket.emit('error', {
+            message: `Cannot continue from a non-complete job (status: ${existingJob.status})`,
+            code: 'JOB_NOT_COMPLETE',
+          })
+          return
+        }
+        if (!builderQueue) {
+          socket.emit('error', { message: 'Builder queue not available', code: 'QUEUE_UNAVAILABLE' })
+          return
+        }
+
+        const projectId = existingJob.project.id
+
+        // Create a new job record for the continuation
+        const newJob = await prisma.job.create({
+          data: {
+            projectId,
+            planId: existingJob.planId,
+            status: 'queued',
+          },
+        })
+
+        // Update project status
+        await prisma.project.update({
+          where: { id: projectId },
+          data: { status: 'building' },
+        })
+
+        socket.emit('job:created', newJob)
+
+        // Emit pipeline status for continuation build
+        const contStrategy = createExecutionStrategy(request, {
+          mode: 'continuation',
+          existingPlan: { projectId },
+        })
+        emitPipelineStatus('running', `Continuation build: ${contStrategy.activeAgents.length} agents activated`, {
+          totalTasks: contStrategy.tasks.length,
+          completedTasks: 0,
+          activeAgents: contStrategy.activeAgents,
+        })
+        for (const agentRole of contStrategy.activeAgents) {
+          emitAgentStatus(agentRole, 'waiting', `${agentRole}: queued for continuation`)
+        }
+
+        // Select worker and dispatch in continuation mode
+        const selection = selectWorker(builderQueue)
+        await prisma.job.update({
+          where: { id: newJob.id },
+          data: {
+            workerName: selection.workerName,
+            workerSelectedReason: selection.selectedReason,
+          },
+        })
+        await selection.queue.add('build', {
+          jobId: newJob.id,
+          projectId,
+          planId: existingJob.planId ?? '',
+          userId,
+          socketId: socket.id,
+          mode: 'continuation',
+          existingJobId,
+          complaint: request,
+        })
+
+        console.log(
+          `[Socket] Continuation job ${newJob.id} queued (existingJobId=${existingJobId}, ` +
+          `worker: ${selection.workerName}, request: "${request.slice(0, 80)}")`
+        )
+      } catch (err) {
+        console.error('[Socket] job:continuation_approve error:', err)
+        socket.emit('error', { message: 'Failed to start continuation build', code: 'CONTINUATION_ERROR' })
+      }
+    })
+
+    // ── job:targeted_repair ───────────────────────────────
+    // Queues a targeted repair for a COMPLETE job.
+    // Regenerates only the files identified by generateRepairPlan() for the complaint.
+    // The preview stays running — Vite HMR picks up the file changes automatically.
+    socket.on('job:targeted_repair', async ({ jobId, complaint }: { jobId: string; complaint: string }) => {
+      try {
+        const job = await prisma.job.findUnique({
+          where: { id: jobId },
+          include: { project: { select: { userId: true } } },
+        })
+        if (!job || job.project.userId !== userId) {
+          socket.emit('error', { message: 'Job not found', code: 'JOB_NOT_FOUND' })
+          return
+        }
+        if (job.status !== 'complete') {
+          socket.emit('error', {
+            message: `Job is not complete (current: ${job.status}). Use job:repair for failed jobs.`,
+            code: 'JOB_NOT_COMPLETE',
+          })
+          return
+        }
+        if (!builderQueue) {
+          socket.emit('error', { message: 'Builder queue not available', code: 'QUEUE_UNAVAILABLE' })
+          return
+        }
+
+        // Set to repairing — preserve previewUrl / previewPort / previewPid
+        const updatedJob = await prisma.job.update({
+          where: { id: jobId },
+          data: { status: 'repairing' },
+        })
+
+        // Emit pipeline status for targeted repair
+        emitPipelineStatus('recovering', 'Targeted repair in progress', {
+          targetedRepair: true,
+          complaint: complaint.slice(0, 200),
+        })
+        emitAgentStatus('fixer', 'running', 'Fixer: analyzing complaint and repairing files')
+
+        const selection = selectWorker(builderQueue)
+        await prisma.job.update({
+          where: { id: jobId },
+          data: {
+            workerName: selection.workerName,
+            workerSelectedReason: selection.selectedReason,
+          },
+        })
+        await selection.queue.add('build', {
+          jobId,
+          projectId: job.projectId,
+          planId: job.planId ?? '',
+          userId,
+          socketId: socket.id,
+          mode: 'repair',
+          complaint,
+        })
+
+        socket.emit('job:updated', { ...updatedJob, status: 'repairing' })
+        console.log(
+          `[Socket] Job ${jobId} queued for targeted repair by user ${userId} ` +
+          `(complaint: "${complaint.slice(0, 100)}")`
+        )
+      } catch (err) {
+        console.error('[Socket] job:targeted_repair error:', err)
+        socket.emit('error', { message: 'Failed to queue targeted repair', code: 'REPAIR_ERROR' })
+      }
+    })
+
     // ── job:repair ────────────────────────────────────────
     // Re-queues a failed job for autonomous repair without re-approving the plan.
     // Resets error state, preserves repairAttemptCount (accumulates across re-queues).
@@ -413,6 +615,10 @@ export function registerSocketEvents(io: Server) {
             completedAt: null,
           },
         })
+
+        // Emit pipeline status for repair re-queue
+        emitPipelineStatus('running', 'Build re-queued for repair')
+        emitAgentStatus('fixer', 'waiting', 'Fixer: queued for repair')
 
         // Select worker and re-queue
         const selection = selectWorker(builderQueue)
@@ -551,6 +757,7 @@ export function registerSocketEvents(io: Server) {
           where: { id: job.projectId },
           data: { status: 'draft' },
         })
+        emitPipelineStatus('cancelled', 'Build cancelled by user')
         socket.emit('job:failed', { jobId, error: { code: 'CANCELLED', message: 'Build cancelled' } })
       } catch {
         socket.emit('error', { message: 'Failed to cancel job', code: 'JOB_ERROR' })
@@ -567,6 +774,17 @@ export function registerSocketEvents(io: Server) {
 
 // ─── AI message handler ───────────────────────────────────────
 
+// ─── Fast heuristic greeting check (no AI call needed) ────────
+
+const FAST_GREETINGS = new Set([
+  'hi', 'hello', 'hey', 'yo', 'sup', 'hiya', 'good morning', 'good evening',
+  'thanks', 'thank you', 'ok', 'okay', 'cool', 'great', 'awesome',
+  'hi!', 'hello!', 'hey!', 'yo!', 'sup!', 'hiya!', 'thanks!', 'thank you!',
+  'hi.', 'hello.', 'hey.', 'ok.', 'okay.',
+])
+
+const GREETING_RESPONSE = "Hey! I'm CodedXP — your autonomous app builder. Tell me what you want to build and I'll plan, code, and deploy it for you.\n\nFor example: *\"Build me a SaaS booking platform with Stripe billing and a dashboard\"*"
+
 async function handleWithAI(
   socket: Socket,
   userId: string,
@@ -576,11 +794,39 @@ async function handleWithAI(
   chatHistory: Array<{ role: 'user' | 'assistant'; content: string }>,
   memoryContext: string = ''
 ) {
+  // ── Fast path: instant greeting response (no AI call) ───────
+  // Short messages that match common greetings get a hardcoded response
+  // immediately. This avoids 2 sequential AI API calls for "hi".
+  const trimmedLower = content.toLowerCase().trim()
+  if (FAST_GREETINGS.has(trimmedLower)) {
+    await persistAndEmitAssistantMessage(socket, chatId, GREETING_RESPONSE, 'text')
+    return
+  }
+
+  // ── Immediate ack for non-trivial messages ──────────────────
+  // Send a visible "thinking" message so the user never stares at silence.
+  // This message appears instantly while the AI classification runs.
+  const ackId = `ack-${chatId}-${Date.now()}`
+  const thinkingMsg = {
+    id: ackId,
+    chatId,
+    role: 'assistant' as const,
+    type: 'text' as const,
+    content: '🔍 Analyzing your request...',
+    createdAt: new Date().toISOString(),
+    isThinking: true,
+  }
+  socket.emit('chat:message', thinkingMsg)
+
   const intent = await classifyIntent(content)
 
   switch (intent) {
     case 'greeting': {
+      // Shouldn't normally reach here (caught by fast path above),
+      // but handle gracefully if AI classifier returns greeting
       const response = await generateGreeting()
+      // Replace thinking message with real response
+      socket.emit('chat:message', { ...thinkingMsg, id: ackId, content: response, isThinking: false })
       await persistAndEmitAssistantMessage(socket, chatId, response, 'text')
       return
     }
@@ -598,7 +844,74 @@ async function handleWithAI(
       return
     }
 
-    // Gap 4: complaint/fix request — check for existing job context, route to repair
+    // Gap 9: continuation — user wants to add new pages/features to an existing completed build
+    case 'continuation': {
+      const recentJob = await prisma.job.findFirst({
+        where: { projectId, status: 'complete' },
+        orderBy: { createdAt: 'desc' },
+        select: { id: true, status: true, workspacePath: true },
+      })
+
+      if (recentJob) {
+        // Acknowledge and suggest continuation build
+        const ackMsg = `Got it — I'll add the new pages/features to your existing build.\n\nI'll generate only the new files and update \`App.tsx\` to wire the new routes. Your existing workspace is preserved and Vite HMR will pick up the changes automatically.`
+        await persistAndEmitAssistantMessage(socket, chatId, ackMsg, 'text')
+
+        socket.emit('job:continuation_suggested', {
+          jobId: recentJob.id,
+          request: content,
+          canContinue: true,
+        })
+      } else {
+        // No complete job found — fall through to build_request
+        const response = `I don't see a completed build to extend yet. Let me create a fresh plan for you instead.`
+        await persistAndEmitAssistantMessage(socket, chatId, response, 'text')
+
+        // Re-route as build_request
+        const { plan: planOutput, metadata } = await generatePlan({
+          userRequest: content,
+          chatHistory,
+          memoryContext: memoryContext || undefined,
+        })
+        const plan = await prisma.plan.create({
+          data: {
+            chatId,
+            projectId,
+            summary: planOutput.summary,
+            features: planOutput.features,
+            techStack: planOutput.techStack as any,
+            frontendScope: planOutput.frontendScope,
+            backendScope: planOutput.backendScope,
+            integrations: planOutput.integrations,
+            executionSteps: planOutput.executionSteps.map(step => ({
+              order: step.order,
+              title: step.title,
+              label: step.title,
+              description: step.description,
+              estimatedDuration: step.estimatedDuration,
+              status: 'pending',
+            })),
+            estimatedComplexity: planOutput.estimatedComplexity,
+            status: 'pending_approval',
+          },
+        })
+        await savePlannerRun({ chatId, projectId, planId: plan.id, userRequest: content, metadata })
+        const message = await prisma.message.create({
+          data: {
+            chatId,
+            role: 'assistant',
+            type: 'plan',
+            content: "Here's the implementation plan I've created for your project. Review it carefully and approve to start building.",
+            metadata: { planId: plan.id },
+          },
+        })
+        socket.emit('plan:created', plan)
+        socket.emit('chat:message', { ...message, metadata: { planId: plan.id, plan } })
+      }
+      return
+    }
+
+    // Gap 4 + Gap 5: complaint/fix request — check for existing job context, route to repair
     case 'fix_request': {
       const recentJob = await prisma.job.findFirst({
         where: { projectId },
@@ -610,9 +923,23 @@ async function handleWithAI(
       const response = await generateRepairResponse(content, jobStatus)
       await persistAndEmitAssistantMessage(socket, chatId, response, 'text')
 
-      // If the most recent job failed, suggest a repair so the UI can show the Repair button
-      if (recentJob && recentJob.status === 'failed') {
-        socket.emit('job:repair_suggested', { jobId: recentJob.id, reason: content })
+      if (recentJob) {
+        if (recentJob.status === 'complete') {
+          // Gap 5: auto-repair path — job is live, targeted repair can run without full rebuild
+          socket.emit('job:repair_suggested', {
+            jobId: recentJob.id,
+            reason: content,
+            complaint: content,
+            canAutoRepair: true,
+          })
+        } else if (recentJob.status === 'failed') {
+          // Standard repair path — re-queue the failed job
+          socket.emit('job:repair_suggested', {
+            jobId: recentJob.id,
+            reason: content,
+            canAutoRepair: false,
+          })
+        }
       }
       return
     }
@@ -623,11 +950,17 @@ async function handleWithAI(
 
   if (intent === 'build_request' || intent === 'modification') {
     try {
+      // Emit planner agent status
+      emitPipelineStatus('planning', 'Analyzing request and generating plan...')
+      emitAgentStatus('planner', 'running', 'Planner: analyzing request...')
+
       const { plan: planOutput, metadata } = await generatePlan({
         userRequest: content,
         chatHistory,
         memoryContext: memoryContext || undefined,
       })
+
+      emitAgentStatus('planner', 'complete', `Planner: plan generated (${metadata.durationMs}ms)`)
 
       const plan = await prisma.plan.create({
         data: {

@@ -19,11 +19,20 @@ import {
   getProjectContext,
   getUserContext,
   getCombinedContext,
+  getUserRules,
+  upsertUserRule,
+  deleteUserRule,
+  getProjectRules,
+  upsertProjectRule,
+  deleteProjectRule,
+  getRepoSnapshot,
+  buildRepoContext,
   type DecisionRecord,
   type FailureRecord,
   type ProjectHistoryEntry,
   type StackPreference,
   type LastBuildMeta,
+  type UserRule,
 } from '../services/memory'
 
 const router: Router = Router()
@@ -295,6 +304,157 @@ router.delete('/project/:projectId', requireAuth, async (req: AuthRequest, res: 
   } catch (err) {
     console.error('[Memory Route] DELETE /project/:projectId error:', err)
     res.status(500).json({ error: 'Failed to clear project memory' })
+  }
+})
+
+// ─── GET /api/memory/snapshot/:projectId ─────────────────────
+// S8: Returns the stored repo snapshot for a project.
+// Used by tests and the orchestrator to verify snapshot storage.
+
+router.get('/snapshot/:projectId', requireAuth, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { projectId } = req.params
+
+    const project = await prisma.project.findFirst({
+      where: { id: projectId, userId: req.userId },
+    })
+    if (!project) {
+      res.status(404).json({ error: 'Project not found' })
+      return
+    }
+
+    const snapshot = await getRepoSnapshot(projectId)
+
+    if (!snapshot) {
+      res.json({
+        hasSnapshot: false,
+        snapshot: null,
+        repoContext: null,
+        projectId,
+      })
+      return
+    }
+
+    const repoContext = buildRepoContext(snapshot)
+
+    res.json({
+      hasSnapshot: true,
+      snapshot,
+      repoContext,
+      projectId,
+    })
+  } catch (err) {
+    console.error('[Memory Route] GET /snapshot/:projectId error:', err)
+    res.status(500).json({ error: 'Failed to read repo snapshot' })
+  }
+})
+
+// ─── Rules endpoints ──────────────────────────────────────────
+
+const ruleSchema = z.object({
+  id:       z.string().optional(),
+  content:  z.string().min(1).max(500),
+  category: z.enum(['stack', 'style', 'deploy', 'install', 'general']),
+  active:   z.boolean().default(true),
+})
+
+// GET /api/memory/rules/user
+router.get('/rules/user', requireAuth, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const rules = await getUserRules(req.userId!)
+    res.json({ rules })
+  } catch (err) {
+    console.error('[Memory Route] GET /rules/user error:', err)
+    res.status(500).json({ error: 'Failed to read user rules' })
+  }
+})
+
+// POST /api/memory/rules/user
+router.post('/rules/user', requireAuth, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const body = ruleSchema.parse(req.body)
+    const rule: UserRule = {
+      id:        body.id ?? `rule_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+      content:   body.content,
+      category:  body.category,
+      active:    body.active,
+      createdAt: new Date().toISOString(),
+    }
+    await upsertUserRule(req.userId!, rule)
+    res.status(201).json({ rule })
+  } catch (err) {
+    if (err instanceof z.ZodError) {
+      res.status(400).json({ error: 'Validation failed', details: err.errors })
+      return
+    }
+    console.error('[Memory Route] POST /rules/user error:', err)
+    res.status(500).json({ error: 'Failed to save user rule' })
+  }
+})
+
+// DELETE /api/memory/rules/user/:ruleId
+router.delete('/rules/user/:ruleId', requireAuth, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { ruleId } = req.params
+    await deleteUserRule(req.userId!, ruleId)
+    res.json({ success: true, ruleId })
+  } catch (err) {
+    console.error('[Memory Route] DELETE /rules/user/:ruleId error:', err)
+    res.status(500).json({ error: 'Failed to delete user rule' })
+  }
+})
+
+// GET /api/memory/rules/project/:projectId
+router.get('/rules/project/:projectId', requireAuth, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { projectId } = req.params
+    const project = await prisma.project.findFirst({ where: { id: projectId, userId: req.userId } })
+    if (!project) { res.status(404).json({ error: 'Project not found' }); return }
+    const rules = await getProjectRules(projectId)
+    res.json({ rules })
+  } catch (err) {
+    console.error('[Memory Route] GET /rules/project/:projectId error:', err)
+    res.status(500).json({ error: 'Failed to read project rules' })
+  }
+})
+
+// POST /api/memory/rules/project/:projectId
+router.post('/rules/project/:projectId', requireAuth, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { projectId } = req.params
+    const project = await prisma.project.findFirst({ where: { id: projectId, userId: req.userId } })
+    if (!project) { res.status(404).json({ error: 'Project not found' }); return }
+    const body = ruleSchema.parse(req.body)
+    const rule: UserRule = {
+      id:        body.id ?? `rule_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+      content:   body.content,
+      category:  body.category,
+      active:    body.active,
+      createdAt: new Date().toISOString(),
+    }
+    await upsertProjectRule(projectId, req.userId!, rule)
+    res.status(201).json({ rule })
+  } catch (err) {
+    if (err instanceof z.ZodError) {
+      res.status(400).json({ error: 'Validation failed', details: err.errors })
+      return
+    }
+    console.error('[Memory Route] POST /rules/project/:projectId error:', err)
+    res.status(500).json({ error: 'Failed to save project rule' })
+  }
+})
+
+// DELETE /api/memory/rules/project/:projectId/:ruleId
+router.delete('/rules/project/:projectId/:ruleId', requireAuth, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { projectId, ruleId } = req.params
+    const project = await prisma.project.findFirst({ where: { id: projectId, userId: req.userId } })
+    if (!project) { res.status(404).json({ error: 'Project not found' }); return }
+    await deleteProjectRule(projectId, ruleId)
+    res.json({ success: true, ruleId })
+  } catch (err) {
+    console.error('[Memory Route] DELETE /rules/project/:projectId/:ruleId error:', err)
+    res.status(500).json({ error: 'Failed to delete project rule' })
   }
 })
 

@@ -1,119 +1,80 @@
-import React from 'react'
+import * as React from 'react'
+import { Slot } from '@radix-ui/react-slot'
+import { cva, type VariantProps } from 'class-variance-authority'
 import { cn } from '@/lib/utils'
-import { Loader2 } from 'lucide-react'
 
-// ─── Types ────────────────────────────────────────────────────
-
-type ButtonVariant = 'accent' | 'ghost' | 'danger' | 'success' | 'outline' | 'subtle'
-type ButtonSize = 'xs' | 'sm' | 'md' | 'lg'
-
-interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
-  variant?: ButtonVariant
-  size?: ButtonSize
-  isLoading?: boolean
-  leftIcon?: React.ReactNode
-  rightIcon?: React.ReactNode
-  fullWidth?: boolean
-}
-
-// ─── Variant styles ───────────────────────────────────────────
-
-const variantStyles: Record<ButtonVariant, string> = {
-  accent: [
-    'bg-accent text-white font-medium',
-    'hover:bg-accent-light',
-    'shadow-glow-accent hover:shadow-[0_0_24px_rgba(124,106,247,0.45)]',
-    'active:scale-[0.98]',
-  ].join(' '),
-
-  ghost: [
-    'text-text-secondary font-medium',
-    'hover:bg-white/[0.05] hover:text-text-primary',
-    'border border-transparent hover:border-white/[0.08]',
-    'active:scale-[0.98]',
-  ].join(' '),
-
-  danger: [
-    'bg-error/10 text-error font-medium',
-    'border border-error/20',
-    'hover:bg-error/20 hover:border-error/30',
-    'active:scale-[0.98]',
-  ].join(' '),
-
-  success: [
-    'bg-success/10 text-success font-medium',
-    'border border-success/20',
-    'hover:bg-success/20 hover:border-success/30',
-    'active:scale-[0.98]',
-  ].join(' '),
-
-  outline: [
-    'text-text-primary font-medium',
-    'border border-white/[0.10]',
-    'hover:bg-white/[0.04] hover:border-white/[0.16]',
-    'active:scale-[0.98]',
-  ].join(' '),
-
-  subtle: [
-    'text-text-muted font-medium',
-    'hover:bg-white/[0.03] hover:text-text-secondary',
-    'active:scale-[0.98]',
-  ].join(' '),
-}
-
-const sizeStyles: Record<ButtonSize, string> = {
-  xs: 'h-6 px-2 text-xs rounded-md gap-1',
-  sm: 'h-8 px-3 text-xs rounded-lg gap-1.5',
-  md: 'h-9 px-4 text-sm rounded-lg gap-2',
-  lg: 'h-11 px-5 text-sm rounded-xl gap-2',
-}
-
-// ─── Component ────────────────────────────────────────────────
-
-export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
-  (
-    {
-      variant = 'ghost',
-      size = 'md',
-      isLoading = false,
-      leftIcon,
-      rightIcon,
-      fullWidth = false,
-      className,
-      children,
-      disabled,
-      ...props
+const buttonVariants = cva(
+  'inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0',
+  {
+    variants: {
+      variant: {
+        default:
+          'bg-primary text-primary-foreground shadow hover:bg-primary/90',
+        destructive:
+          'bg-destructive text-destructive-foreground shadow-sm hover:bg-destructive/90',
+        outline:
+          'border border-input bg-background shadow-sm hover:bg-accent hover:text-accent-foreground',
+        secondary:
+          'bg-secondary text-secondary-foreground shadow-sm hover:bg-secondary/80',
+        ghost: 'hover:bg-accent hover:text-accent-foreground',
+        link: 'text-primary underline-offset-4 hover:underline',
+        // Extended variants used across the app
+        accent:
+          'bg-purple-600 text-white shadow-sm hover:bg-purple-700',
+        success:
+          'bg-emerald-600 text-white shadow-sm hover:bg-emerald-700',
+        danger:
+          'bg-red-600 text-white shadow-sm hover:bg-red-700',
+      },
+      size: {
+        default: 'h-9 px-4 py-2',
+        xs: 'h-6 rounded px-2 text-xs',
+        sm: 'h-8 rounded-md px-3 text-xs',
+        lg: 'h-10 rounded-md px-8',
+        icon: 'h-9 w-9',
+      },
     },
-    ref
-  ) => {
-    return (
-      <button
-        ref={ref}
-        disabled={disabled || isLoading}
-        className={cn(
-          'inline-flex items-center justify-center',
-          'transition-all duration-150 cursor-pointer',
-          'select-none whitespace-nowrap',
-          'disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none',
-          variantStyles[variant],
-          sizeStyles[size],
-          fullWidth && 'w-full',
-          className
-        )}
-        {...props}
-      >
-        {isLoading ? (
-          <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
-        ) : (
-          leftIcon && <span className="shrink-0">{leftIcon}</span>
-        )}
-        {children && <span>{children}</span>}
-        {!isLoading && rightIcon && (
-          <span className="shrink-0">{rightIcon}</span>
-        )}
-      </button>
-    )
+    defaultVariants: {
+      variant: 'default',
+      size: 'default',
+    },
   }
 )
 
+export interface ButtonProps
+  extends React.ButtonHTMLAttributes<HTMLButtonElement>,
+    VariantProps<typeof buttonVariants> {
+  asChild?: boolean
+  /** Icon rendered to the left of the button label */
+  leftIcon?: React.ReactNode
+  /** Stretch button to full container width */
+  fullWidth?: boolean
+  /** Show a spinner and disable the button while loading */
+  isLoading?: boolean
+}
+
+const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
+  ({ className, variant, size, asChild = false, leftIcon, fullWidth, isLoading, children, ...props }, ref) => {
+    const Comp = asChild ? Slot : 'button'
+    return (
+      <Comp
+        className={cn(buttonVariants({ variant, size, className }), fullWidth && 'w-full')}
+        ref={ref}
+        disabled={isLoading || props.disabled}
+        {...props}
+      >
+        {isLoading && (
+          <svg className="animate-spin h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none">
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+          </svg>
+        )}
+        {!isLoading && leftIcon && <span className="shrink-0">{leftIcon}</span>}
+        {children}
+      </Comp>
+    )
+  }
+)
 Button.displayName = 'Button'
+
+export { Button, buttonVariants }

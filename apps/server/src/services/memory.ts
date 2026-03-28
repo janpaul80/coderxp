@@ -18,6 +18,7 @@ import fs from 'fs'
 import path from 'path'
 import { prisma } from '../lib/prisma'
 import { Prisma } from '@prisma/client'
+import type { WorkspaceSnapshot } from './workspaceIndexer'
 
 // ─── Type definitions for JSON fields ────────────────────────
 
@@ -526,6 +527,187 @@ async function updateUserProjectHistory(
   }
 }
 
+// ─── User Rules (explicit user-defined instructions) ─────────
+
+export interface UserRule {
+  id: string
+  content: string
+  category: 'stack' | 'style' | 'deploy' | 'install' | 'general'
+  active: boolean
+  createdAt: string  // ISO
+}
+
+/**
+ * Get all user-level rules.
+ * Returns [] if no memory exists or on error.
+ */
+export async function getUserRules(userId: string): Promise<UserRule[]> {
+  try {
+    const memory = await prisma.userMemory.findUnique({ where: { userId } })
+    if (!memory) return []
+    return ((memory as Record<string, unknown>).userRules as UserRule[]) ?? []
+  } catch (err) {
+    console.warn('[Memory] getUserRules failed (non-fatal):', err)
+    return []
+  }
+}
+
+/**
+ * Add or update a user-level rule.
+ * If rule.id already exists, it is replaced. Otherwise appended.
+ */
+export async function upsertUserRule(userId: string, rule: UserRule): Promise<void> {
+  try {
+    const existing = await prisma.userMemory.findUnique({ where: { userId } })
+    const rules = (((existing as Record<string, unknown> | null)?.userRules as UserRule[]) ?? [])
+    const idx = rules.findIndex(r => r.id === rule.id)
+    if (idx >= 0) {
+      rules[idx] = rule
+    } else {
+      rules.push(rule)
+    }
+    await prisma.userMemory.upsert({
+      where: { userId },
+      create: {
+        userId,
+        userRules:         rules as unknown as Prisma.InputJsonValue,
+        projectHistory:    [] as unknown as Prisma.InputJsonValue,
+        knownIntegrations: [] as unknown as Prisma.InputJsonValue,
+      },
+      update: {
+        userRules: rules as unknown as Prisma.InputJsonValue,
+        version:   { increment: 1 },
+      },
+    })
+    console.log(`[Memory] Upserted user rule ${rule.id} for ${userId} (category=${rule.category})`)
+  } catch (err) {
+    console.warn('[Memory] upsertUserRule failed (non-fatal):', err)
+  }
+}
+
+/**
+ * Delete a user-level rule by id.
+ */
+export async function deleteUserRule(userId: string, ruleId: string): Promise<void> {
+  try {
+    const existing = await prisma.userMemory.findUnique({ where: { userId } })
+    if (!existing) return
+    const rules = (((existing as Record<string, unknown>).userRules as UserRule[]) ?? []).filter(r => r.id !== ruleId)
+    await prisma.userMemory.update({
+      where: { userId },
+      data: {
+        userRules: rules as unknown as Prisma.InputJsonValue,
+        version:   { increment: 1 },
+      },
+    })
+    console.log(`[Memory] Deleted user rule ${ruleId} for ${userId}`)
+  } catch (err) {
+    console.warn('[Memory] deleteUserRule failed (non-fatal):', err)
+  }
+}
+
+/**
+ * Get all project-level rules.
+ * Returns [] if no memory exists or on error.
+ */
+export async function getProjectRules(projectId: string): Promise<UserRule[]> {
+  try {
+    const memory = await prisma.projectMemory.findUnique({ where: { projectId } })
+    if (!memory) return []
+    return ((memory as Record<string, unknown>).projectRules as UserRule[]) ?? []
+  } catch (err) {
+    console.warn('[Memory] getProjectRules failed (non-fatal):', err)
+    return []
+  }
+}
+
+/**
+ * Add or update a project-level rule.
+ */
+export async function upsertProjectRule(
+  projectId: string,
+  userId: string,
+  rule: UserRule
+): Promise<void> {
+  try {
+    const existing = await prisma.projectMemory.findUnique({ where: { projectId } })
+    const rules = (((existing as Record<string, unknown> | null)?.projectRules as UserRule[]) ?? [])
+    const idx = rules.findIndex(r => r.id === rule.id)
+    if (idx >= 0) {
+      rules[idx] = rule
+    } else {
+      rules.push(rule)
+    }
+    await prisma.projectMemory.upsert({
+      where: { projectId },
+      create: {
+        projectId,
+        userId,
+        projectRules:  rules as unknown as Prisma.InputJsonValue,
+        failureHistory: [] as unknown as Prisma.InputJsonValue,
+        decisions:      [] as unknown as Prisma.InputJsonValue,
+        integrations:   [] as unknown as Prisma.InputJsonValue,
+      },
+      update: {
+        projectRules: rules as unknown as Prisma.InputJsonValue,
+        version:      { increment: 1 },
+      },
+    })
+    console.log(`[Memory] Upserted project rule ${rule.id} for ${projectId} (category=${rule.category})`)
+  } catch (err) {
+    console.warn('[Memory] upsertProjectRule failed (non-fatal):', err)
+  }
+}
+
+/**
+ * Delete a project-level rule by id.
+ */
+export async function deleteProjectRule(projectId: string, ruleId: string): Promise<void> {
+  try {
+    const existing = await prisma.projectMemory.findUnique({ where: { projectId } })
+    if (!existing) return
+    const rules = (((existing as Record<string, unknown>).projectRules as UserRule[]) ?? []).filter(r => r.id !== ruleId)
+    await prisma.projectMemory.update({
+      where: { projectId },
+      data: {
+        projectRules: rules as unknown as Prisma.InputJsonValue,
+        version:      { increment: 1 },
+      },
+    })
+    console.log(`[Memory] Deleted project rule ${ruleId} for ${projectId}`)
+  } catch (err) {
+    console.warn('[Memory] deleteProjectRule failed (non-fatal):', err)
+  }
+}
+
+/**
+ * Build a compact rules block for injection into the AI system prompt.
+ * Project rules override / supplement user rules.
+ * Only active rules are included.
+ * Returns '' if no active rules.
+ */
+export function buildRulesBlock(userRules: UserRule[], projectRules: UserRule[]): string {
+  const activeUser    = userRules.filter(r => r.active)
+  const activeProject = projectRules.filter(r => r.active)
+
+  if (!activeUser.length && !activeProject.length) return ''
+
+  const lines: string[] = ['=== USER RULES (always follow — higher priority than defaults) ===']
+
+  if (activeUser.length) {
+    lines.push('User-level rules:')
+    activeUser.forEach(r => lines.push(`  - [${r.category}] ${r.content}`))
+  }
+
+  if (activeProject.length) {
+    lines.push('Project-level rules (override user rules for this project):')
+    activeProject.forEach(r => lines.push(`  - [${r.category}] ${r.content}`))
+  }
+
+  lines.push('=== END USER RULES ===')
+  return lines.join('\n')
+}
+
 // ─── Workspace memory.md (supplemental artifact) ─────────────
 
 /**
@@ -581,4 +763,186 @@ export function writeWorkspaceMemoryFile(
   } catch (err) {
     console.warn('[Memory] writeWorkspaceMemoryFile failed (non-fatal):', err)
   }
+}
+
+// ─── Repo Snapshot (Sprint 8) ─────────────────────────────────
+
+/**
+ * Store a WorkspaceSnapshot in ProjectMemory after a successful build.
+ * Upserts the repoSnapshot field only — does not touch other memory fields.
+ * Safe to call without await — errors are caught and logged.
+ */
+export async function storeRepoSnapshot(
+  projectId: string,
+  userId: string,
+  snapshot: WorkspaceSnapshot
+): Promise<void> {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (prisma.projectMemory as any).upsert({
+      where: { projectId },
+      create: {
+        projectId,
+        userId,
+        repoSnapshot:   snapshot,
+        failureHistory: [],
+        decisions:      [],
+        integrations:   [],
+        projectRules:   [],
+      },
+      update: {
+        repoSnapshot: snapshot,
+        version:      { increment: 1 },
+      },
+    })
+    console.log(
+      `[Memory] Stored repoSnapshot for ${projectId}` +
+      ` (${snapshot.totalFiles} files, ${snapshot.components.length} components,` +
+      ` ${snapshot.routes.length} routes, ${snapshot.apiEndpoints.length} endpoints,` +
+      ` scope=project, updated=repoSnapshot)`
+    )
+  } catch (err) {
+    console.warn('[Memory] storeRepoSnapshot failed (non-fatal):', err)
+  }
+}
+
+/**
+ * Retrieve the stored WorkspaceSnapshot for a project.
+ * Returns null if no snapshot exists or on error (never throws).
+ */
+export async function getRepoSnapshot(projectId: string): Promise<WorkspaceSnapshot | null> {
+  try {
+    const memory = await prisma.projectMemory.findUnique({ where: { projectId } })
+    if (!memory) return null
+    // Cast through Record to access repoSnapshot before Prisma client is regenerated
+    const raw = (memory as Record<string, unknown>).repoSnapshot
+    if (!raw) return null
+    return raw as unknown as WorkspaceSnapshot
+  } catch (err) {
+    console.warn('[Memory] getRepoSnapshot failed (non-fatal):', err)
+    return null
+  }
+}
+
+/**
+ * Format a WorkspaceSnapshot as a compact, high-signal context string.
+ * Injected into planning, generation, repair, and continuation prompts.
+ *
+ * Design: compact and structured — helps the AI understand what already exists
+ * without bloating the prompt. No raw file content is included.
+ *
+ * Example output:
+ *   === REPO SNAPSHOT ===
+ *   Captured: 2026-03-24 (42 files, 1.2 MB)
+ *   Components: Home, Header, Login, Register, Dashboard, Pricing
+ *   Routes: / → Home, /login → Login, /register → Register
+ *   API endpoints: GET /api/status, POST /api/auth/login, GET /api/auth/me
+ *   Prisma models: User, Session, Subscription
+ *   Dependencies: react, react-router-dom, axios, tailwindcss, express, prisma
+ *   === END REPO SNAPSHOT ===
+ */
+export function buildRepoContext(snapshot: WorkspaceSnapshot): string {
+  const lines: string[] = ['=== REPO SNAPSHOT ===']
+
+  // Header: timestamp + size
+  const date = snapshot.capturedAt
+    ? new Date(snapshot.capturedAt).toISOString().slice(0, 10)
+    : 'unknown'
+  const sizeMb = snapshot.totalBytes
+    ? ` ${(snapshot.totalBytes / 1024 / 1024).toFixed(1)} MB`
+    : ''
+  lines.push(`Captured: ${date} (${snapshot.totalFiles} files,${sizeMb})`)
+
+  // Components (cap at 20 for compactness)
+  if (snapshot.components.length > 0) {
+    const shown = snapshot.components.slice(0, 20)
+    const extra = snapshot.components.length > 20 ? ` +${snapshot.components.length - 20} more` : ''
+    lines.push(`Components: ${shown.join(', ')}${extra}`)
+  }
+
+  // Routes (cap at 15)
+  if (snapshot.routes.length > 0) {
+    const shown = snapshot.routes.slice(0, 15)
+    const extra = snapshot.routes.length > 15 ? ` +${snapshot.routes.length - 15} more` : ''
+    const routeStr = shown.map(r => `${r.path} → ${r.component}`).join(', ')
+    lines.push(`Routes: ${routeStr}${extra}`)
+  }
+
+  // API endpoints (cap at 15)
+  if (snapshot.apiEndpoints.length > 0) {
+    const shown = snapshot.apiEndpoints.slice(0, 15)
+    const extra = snapshot.apiEndpoints.length > 15 ? ` +${snapshot.apiEndpoints.length - 15} more` : ''
+    const epStr = shown.map(e => `${e.method} ${e.path}`).join(', ')
+    lines.push(`API endpoints: ${epStr}${extra}`)
+  }
+
+  // Prisma models
+  if (snapshot.prismaModels.length > 0) {
+    lines.push(`Prisma models: ${snapshot.prismaModels.join(', ')}`)
+  }
+
+  // Dependencies (cap at 15)
+  if (snapshot.dependencies.length > 0) {
+    const shown = snapshot.dependencies.slice(0, 15)
+    const extra = snapshot.dependencies.length > 15 ? ` +${snapshot.dependencies.length - 15} more` : ''
+    lines.push(`Dependencies: ${shown.join(', ')}${extra}`)
+  }
+
+  // ── Repo Intelligence (Sprint 19) ─────────────────────────
+  const intel = snapshot.repoIntelligence
+  if (intel) {
+    lines.push('')
+    lines.push('=== REPO INTELLIGENCE ===')
+
+    // Naming conventions
+    lines.push(`Naming: files=${intel.naming.files}, vars=${intel.naming.variables}, components=${intel.naming.components}, folders=${intel.naming.folders}, css=${intel.naming.cssClasses}`)
+
+    // Style system
+    lines.push(`Style: ${intel.style.approach}${intel.style.uiFramework !== 'none' ? ` + ${intel.style.uiFramework}` : ''}${intel.style.hasTheme ? ' (has theme/tokens)' : ''}`)
+    if (intel.style.colorTokens.length > 0) {
+      lines.push(`Color tokens: ${intel.style.colorTokens.join(', ')}`)
+    }
+
+    // Architecture
+    const arch = intel.architecture
+    lines.push(`Architecture: routing=${arch.routing}, state=${arch.stateManagement}, data=${arch.dataFetching}, forms=${arch.formHandling}`)
+    lines.push(`Backend: framework=${arch.backendFramework}, orm=${arch.orm}, auth=${arch.authApproach}`)
+    lines.push(`Structure: ${arch.folderStructure}`)
+
+    // Component library
+    const lib = intel.componentLibrary
+    if (lib.name !== 'none') {
+      lines.push(`UI Library: ${lib.name}`)
+      if (lib.usedComponents.length > 0) {
+        const shown = lib.usedComponents.slice(0, 15)
+        lines.push(`Library components in use: ${shown.join(', ')}${lib.usedComponents.length > 15 ? ` +${lib.usedComponents.length - 15} more` : ''}`)
+      }
+    }
+    if (lib.customSharedComponents.length > 0) {
+      lines.push(`Custom shared components: ${lib.customSharedComponents.slice(0, 10).join(', ')}`)
+    }
+
+    // API contracts (compact summary)
+    if (intel.apiContracts.length > 0) {
+      lines.push(`API contracts (${intel.apiContracts.length}):`)
+      for (const c of intel.apiContracts.slice(0, 10)) {
+        const auth = c.authRequired ? ' [auth]' : ''
+        const req = c.requestFields.length > 0 ? ` req:{${c.requestFields.join(',')}}` : ''
+        const res = c.responseFields.length > 0 ? ` res:{${c.responseFields.join(',')}}` : ''
+        lines.push(`  ${c.method} ${c.path}${auth}${req}${res}`)
+      }
+    }
+
+    lines.push('')
+    lines.push('INSTRUCTIONS: Follow the detected naming conventions, style system, and architecture patterns above.')
+    lines.push('Use the same UI library/components. Match the folder structure. Stay consistent with existing API contracts.')
+    lines.push('=== END REPO INTELLIGENCE ===')
+  }
+
+  lines.push('')
+  lines.push('=== END REPO SNAPSHOT ===')
+  lines.push('IMPORTANT: Do not duplicate existing components, routes, or API endpoints listed above.')
+  lines.push('Build only what is new or explicitly requested. Extend existing files where appropriate.')
+
+  return lines.join('\n')
 }
