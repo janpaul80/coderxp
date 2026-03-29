@@ -7,10 +7,10 @@
 
 /* ─── CSS Custom Properties ─────────────────────────────────── */
 :root {
-  --bg-base: #080810;
-  --bg-surface: #0d0d1a;
-  --bg-elevated: #12121f;
-  --bg-card: #161625;
+  --bg-base: #09090b;
+  --bg-surface: #121215;
+  --bg-elevated: #18181b;
+  --bg-card: #1c1c1f;
   --border: rgba(255, 255, 255, 0.06);
   --border-strong: rgba(255, 255, 255, 0.10);
   --text-primary: #e8e8f0;

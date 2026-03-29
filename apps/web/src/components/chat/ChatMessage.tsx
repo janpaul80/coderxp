@@ -13,8 +13,8 @@ import { ErrorAnalysisCard } from './ErrorAnalysisCard'
 
 function AssistantAvatar() {
   return (
-    <div className="w-6 h-6 rounded-full bg-accent/20 border border-accent/20 flex items-center justify-center shrink-0">
-      <Zap className="w-3 h-3 text-accent" />
+    <div className="w-6 h-6 rounded-full bg-white/[0.08] border border-white/[0.10] flex items-center justify-center shrink-0">
+      <Zap className="w-3 h-3 text-white/70" />
     </div>
   )
 }
@@ -168,7 +168,7 @@ const markdownComponents: React.ComponentProps<typeof ReactMarkdown>['components
 function MessageContent({ message, rich = false }: { message: Message; rich?: boolean }) {
   if (rich) {
     return (
-      <div className="text-sm leading-relaxed text-text-primary prose-invert max-w-none">
+      <div className="text-sm leading-relaxed text-[#F3F4F6] prose-invert max-w-none">
         <ReactMarkdown
           remarkPlugins={[remarkGfm]}
           components={markdownComponents}
@@ -182,7 +182,7 @@ function MessageContent({ message, rich = false }: { message: Message; rich?: bo
 
   const lines = message.content.split('\n')
   return (
-    <div className="text-sm leading-relaxed text-text-primary">
+    <div className="text-sm leading-relaxed text-[#F3F4F6]">
       {lines.map((line, i) => (
         <React.Fragment key={i}>
           {line}
@@ -199,7 +199,7 @@ function MessageContent({ message, rich = false }: { message: Message; rich?: bo
 function SystemMessage({ message }: { message: Message }) {
   return (
     <div className="flex justify-center px-4 py-1">
-      <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-base-elevated border border-white/[0.05]">
+      <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-[#1D1D1D] border border-white/[0.05]">
         <MessageTypeIcon type={message.type} />
         <span className="text-xs text-text-muted">{message.content}</span>
       </div>
@@ -213,7 +213,7 @@ function UserMessage({ message }: { message: Message }) {
   return (
     <div className="flex items-start gap-2.5 px-4 py-1.5 justify-end">
       <div className="flex flex-col items-end gap-1 max-w-[85%]">
-        <div className="bg-accent/10 border border-accent/15 rounded-2xl rounded-tr-sm px-4 py-2.5">
+        <div className="bg-[#1D1D1D] rounded-2xl rounded-tr-sm px-4 py-2.5">
           <MessageContent message={message} />
         </div>
         <span className="text-2xs text-text-muted px-1">
@@ -239,8 +239,8 @@ function AssistantMessage({ message }: { message: Message }) {
         <div className={cn(
           'rounded-2xl rounded-tl-sm px-4 py-2.5',
           isSpecial
-            ? 'bg-base-elevated border border-white/[0.08]'
-            : 'bg-base-elevated border border-white/[0.06]'
+            ? 'bg-[#1D1D1D] border border-white/[0.08]'
+            : 'bg-[#1D1D1D]'
         )}>
           {isSpecial && (
             <div className="flex items-center gap-1.5 mb-2 pb-2 border-b border-white/[0.06]">
@@ -284,7 +284,7 @@ function ContinuationCard({ message }: { message: Message }) {
     <div className="flex items-start gap-2.5 px-4 py-1.5">
       <AssistantAvatar />
       <div className="flex flex-col gap-1 max-w-[90%]">
-        <div className="rounded-2xl rounded-tl-sm px-4 py-3 bg-base-elevated border border-accent/25">
+        <div className="rounded-2xl rounded-tl-sm px-4 py-3 bg-[#1D1D1D] border border-accent/25">
           <div className="flex items-center gap-1.5 mb-2 pb-2 border-b border-white/[0.06]">
             <Play className="w-3.5 h-3.5 text-accent shrink-0" />
             <span className="text-xs font-medium text-accent">Continue Build</span>
@@ -343,7 +343,7 @@ function RepairCard({ message }: { message: Message }) {
     <div className="flex items-start gap-2.5 px-4 py-1.5">
       <AssistantAvatar />
       <div className="flex flex-col gap-1 max-w-[90%]">
-        <div className="rounded-2xl rounded-tl-sm px-4 py-3 bg-base-elevated border border-warning/25">
+        <div className="rounded-2xl rounded-tl-sm px-4 py-3 bg-[#1D1D1D] border border-warning/25">
           <div className="flex items-center gap-1.5 mb-2 pb-2 border-b border-white/[0.06]">
             <Wrench className="w-3.5 h-3.5 text-warning shrink-0" />
             <span className="text-xs font-medium text-warning">

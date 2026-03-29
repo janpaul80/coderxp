@@ -73,7 +73,7 @@ export function PreviewView() {
   }
 
   return (
-    <div className="flex flex-col h-full bg-[#0a0a14]">
+    <div className="flex flex-col h-full bg-transparent">
       {/* ── Browser chrome ──────────────────────────────────── */}
       <div className="shrink-0 flex items-center gap-2 px-3 py-2 border-b border-white/[0.04]">
         {/* Back */}
@@ -184,7 +184,7 @@ export function PreviewView() {
               sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
             />
           ) : previewFailed ? (
-            <div className="w-full h-full flex flex-col items-center justify-center bg-[#0a0a14] px-8">
+            <div className="w-full h-full flex flex-col items-center justify-center bg-transparent px-8">
               <div className="flex flex-col items-center text-center max-w-xs">
                 <div className="w-12 h-12 rounded-2xl bg-white/[0.04] border border-white/[0.06] flex items-center justify-center mb-4">
                   <AlertTriangle className="w-5 h-5 text-white/25" />
@@ -204,7 +204,7 @@ export function PreviewView() {
               </div>
             </div>
           ) : (
-            <div className="w-full h-full flex flex-col items-center justify-center bg-[#0a0a14]">
+            <div className="w-full h-full flex flex-col items-center justify-center bg-transparent">
               <motion.div
                 animate={{ opacity: [0.5, 1, 0.5] }}
                 transition={{ duration: 3, repeat: Infinity, ease: 'easeInOut' }}

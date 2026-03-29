@@ -49,11 +49,11 @@ export function AppLayout() {
 
   return (
     <>
-      <div ref={containerRef} className="flex h-screen w-screen overflow-hidden" style={{ backgroundColor: '#060610' }}>
+      <div ref={containerRef} className="flex h-screen w-screen overflow-hidden" style={{ backgroundColor: '#09090b' }}>
         {/* ── Left panel — chat ───────────────────────────────── */}
         <div
-          className="shrink-0 flex flex-col overflow-hidden"
-          style={{ width: leftWidth, backgroundColor: '#080814' }}
+          className="shrink-0 flex flex-col overflow-hidden border-r border-white/[0.04]"
+          style={{ width: leftWidth, backgroundColor: '#18181b' }}
         >
           <LeftPanel />
         </div>
@@ -61,14 +61,14 @@ export function AppLayout() {
         {/* ── Resize handle ──────────────────────────────────── */}
         <div
           onMouseDown={onMouseDown}
-          className="w-px shrink-0 relative cursor-col-resize group z-10"
-          style={{ background: 'rgba(255,255,255,0.06)' }}
+          className="w-[2px] shrink-0 relative cursor-col-resize group z-10 hover:bg-white/[0.1] transition-colors"
+          style={{ background: 'transparent', marginLeft: '-1px' }}
         >
-          <div className="absolute inset-y-0 -left-1 -right-1 group-hover:bg-accent/20 transition-colors duration-150" />
+          <div className="absolute inset-y-0 -left-1 -right-1 group-hover:bg-transparent" />
         </div>
 
         {/* ── Right panel — execution / preview ──────────────── */}
-        <div className="flex-1 min-w-0 flex flex-col overflow-hidden" style={{ backgroundColor: '#0a0a14' }}>
+        <div className="flex-1 min-w-0 flex flex-col overflow-hidden" style={{ backgroundColor: '#121215' }}>
           <RightPanel />
         </div>
       </div>

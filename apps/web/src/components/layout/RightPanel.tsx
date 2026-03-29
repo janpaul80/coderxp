@@ -58,7 +58,7 @@ export function RightPanel() {
     (panelMode === 'building' || panelMode === 'preview') && !!activeJobId
 
   return (
-    <div className="relative flex flex-col h-full w-full overflow-hidden bg-[#0a0a14]">
+    <div className="relative flex flex-col h-full w-full overflow-hidden bg-[#121215]">
 
       {/* File Explorer toggle button — shown during building/preview */}
       {canShowExplorer && (

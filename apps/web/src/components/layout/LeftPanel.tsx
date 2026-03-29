@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react'
-import { LogIn, UserPlus, ChevronDown, LogOut, Settings, Coins } from 'lucide-react'
+import { LogIn, UserPlus, ChevronDown, LogOut, Settings, Coins, Shield, Plug } from 'lucide-react'
 import { useAppStore } from '@/store/appStore'
 import { useAuthStore } from '@/store/authStore'
 import { useChatStore } from '@/store/chatStore'
@@ -10,6 +10,71 @@ import { ChatInput } from '@/components/chat/ChatInput'
 import { cn } from '@/lib/utils'
 import { SettingsModal } from '@/components/settings/SettingsModal'
 import { CreditsModal } from '@/components/settings/CreditsModal'
+import { ApiProviderModal } from '@/components/settings/ApiProviderModal'
+import { McpMarketplaceModal } from '@/components/settings/McpMarketplaceModal'
+
+// ─── Plugins dropdown ──────────────────────────────────────────
+
+function PluginsDropdown({ onOpenApi, onOpenMcp }: { onOpenApi: () => void, onOpenMcp: () => void }) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    function handleClick(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) {
+        setOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClick)
+    return () => document.removeEventListener('mousedown', handleClick)
+  }, [])
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        onClick={() => setOpen(!open)}
+        className={cn(
+          'flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all',
+          'bg-white/[0.04] border border-white/[0.06] text-white/60',
+          'hover:bg-white/[0.08] hover:border-white/[0.12]',
+          open && 'bg-white/[0.08] border-white/[0.12]'
+        )}
+      >
+        <span>Plugins</span>
+        <ChevronDown className={cn('w-3 h-3 transition-transform duration-150', open && 'rotate-180')} />
+      </button>
+
+      {open && (
+        <div className={cn(
+          'absolute right-0 top-full mt-1.5 w-48 z-50',
+          'bg-[#1D1D1D] border border-white/[0.08] rounded-xl shadow-card-lg',
+          'py-1 overflow-hidden'
+        )}>
+          <button
+            onClick={() => { onOpenApi(); setOpen(false) }}
+            className="w-full flex items-center gap-2.5 px-3 py-2.5 text-xs text-text-secondary hover:text-white hover:bg-white/[0.04] transition-all"
+          >
+            <Shield className="w-4 h-4 text-white/40 shrink-0" />
+            <div className="text-left">
+              <p className="font-medium text-white/90">API Settings</p>
+              <p className="text-2xs text-white/40">Manage AI providers</p>
+            </div>
+          </button>
+          <button
+            onClick={() => { onOpenMcp(); setOpen(false) }}
+            className="w-full flex items-center gap-2.5 px-3 py-2.5 text-xs text-text-secondary hover:text-white hover:bg-white/[0.04] transition-all"
+          >
+            <Plug className="w-4 h-4 text-emerald-400/60 shrink-0" />
+            <div className="text-left">
+              <p className="font-medium text-white/90">MCP Tools</p>
+              <p className="text-2xs text-white/40">Browse external tools</p>
+            </div>
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
 
 // ─── Auth dropdown ────────────────────────────────────────────
 
@@ -40,8 +105,8 @@ function AuthDropdown({ onOpenSettings }: { onOpenSettings?: () => void }) {
             open && 'bg-white/[0.05]'
           )}
         >
-          <div className="w-6 h-6 rounded-full bg-accent/20 border border-accent/25 flex items-center justify-center shrink-0">
-            <span className="text-2xs font-semibold text-accent-light">
+          <div className="w-6 h-6 rounded-full bg-[#1D1D1D] border border-white/[0.08] flex items-center justify-center shrink-0">
+            <span className="text-2xs font-semibold text-white/80">
               {user.name?.charAt(0).toUpperCase() ?? 'U'}
             </span>
           </div>
@@ -51,7 +116,7 @@ function AuthDropdown({ onOpenSettings }: { onOpenSettings?: () => void }) {
         {open && (
           <div className={cn(
             'absolute right-0 top-full mt-1.5 w-44 z-50',
-            'bg-base-card border border-white/[0.08] rounded-xl shadow-card-lg',
+            'bg-[#1D1D1D] border border-white/[0.08] rounded-xl shadow-card-lg',
             'py-1 overflow-hidden'
           )}>
             <div className="px-3 py-2 border-b border-white/[0.06]">
@@ -97,7 +162,7 @@ function AuthDropdown({ onOpenSettings }: { onOpenSettings?: () => void }) {
       {open && (
         <div className={cn(
           'absolute right-0 top-full mt-1.5 w-44 z-50',
-          'bg-base-card border border-white/[0.08] rounded-xl shadow-card-lg',
+          'bg-[#1D1D1D] border border-white/[0.08] rounded-xl shadow-card-lg',
           'py-1 overflow-hidden'
         )}>
           <button
@@ -135,6 +200,8 @@ export function LeftPanel() {
   const user = useAuthStore((s) => s.user)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [creditsOpen, setCreditsOpen] = useState(false)
+  const [apiModalOpen, setApiModalOpen] = useState(false)
+  const [mcpModalOpen, setMcpModalOpen] = useState(false)
 
   const activeProject = projects.find((p) => p.id === activeProjectId)
 
@@ -147,7 +214,7 @@ export function LeftPanel() {
           <img
             src="/logo-white.png"
             alt="CoderXP"
-            className="h-6 w-auto select-none"
+            className="h-12 md:h-14 w-auto select-none"
             draggable={false}
           />
         </div>
@@ -155,6 +222,9 @@ export function LeftPanel() {
         <div className="flex items-center gap-1.5">
           {/* Status indicator */}
           <StatusIndicator mode={appMode} showLabel={false} />
+
+          {/* Plugins dropdown */}
+          <PluginsDropdown onOpenApi={() => setApiModalOpen(true)} onOpenMcp={() => setMcpModalOpen(true)} />
 
           {/* Credits button */}
           <button
@@ -165,7 +235,7 @@ export function LeftPanel() {
               'hover:bg-accent/10 hover:border-accent/20 hover:text-accent-light'
             )}
           >
-            <Coins className="w-3 h-3" />
+            <Coins className="w-3.5 h-3.5" />
             <span className="tabular-nums">{user?.credits ?? 0}</span>
           </button>
 
@@ -205,9 +275,24 @@ export function LeftPanel() {
       </div>
 
       {/* ── Status footer ───────────────────────────────────── */}
-      <div className="shrink-0 px-4 py-2 border-t border-white/[0.04] bg-white/[0.015]">
+      <div className="shrink-0 px-4 py-2 border-t border-white/[0.04] bg-transparent">
         <div className="flex items-center justify-between">
-          <span className="text-2xs text-white/20">CoderXP</span>
+          <span className="text-xs text-white/50 tracking-wider">CoderXP</span>
+          
+          <span className="text-xs text-white/40 hidden xl:inline font-medium">
+            Upgrade to Team for more credits.<span className="mx-1.5 opacity-40">•</span>
+            <a href="https://coderxp.pro/pricing" target="_blank" rel="noreferrer" className="text-emerald-400 hover:text-emerald-300">
+              Upgrade Plan
+            </a>
+          </span>
+
+          <span className="text-[10px] text-white/40 hidden md:inline xl:hidden">
+            Upgrade to Team for more c...
+            <a href="https://coderxp.pro/pricing" target="_blank" rel="noreferrer" className="text-emerald-400 hover:text-emerald-300 ml-1">
+              Upgrade Plan
+            </a>
+          </span>
+
           <StatusIndicator mode={appMode} showLabel={true} className="shrink-0" />
         </div>
       </div>
@@ -222,6 +307,8 @@ export function LeftPanel() {
         open={creditsOpen}
         onClose={() => setCreditsOpen(false)}
       />
+      <ApiProviderModal open={apiModalOpen} onClose={() => setApiModalOpen(false)} />
+      <McpMarketplaceModal open={mcpModalOpen} onClose={() => setMcpModalOpen(false)} />
     </div>
   )
 }

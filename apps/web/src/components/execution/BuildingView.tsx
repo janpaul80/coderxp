@@ -32,7 +32,7 @@ function StreamingCodePanel() {
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
         transition={{ duration: 0.2 }}
-        className="flex-1 min-h-0 flex flex-col bg-[#09090f]"
+        className="flex-1 min-h-0 flex flex-col bg-black/20"
       >
         {/* File path header */}
         <div className="flex items-center gap-2 px-4 py-2 border-b border-white/[0.04] bg-white/[0.02] shrink-0">
@@ -111,7 +111,7 @@ export function BuildingView() {
   const status = buildProgress?.status ?? 'initializing'
 
   return (
-    <div className="flex flex-col h-full bg-[#0a0a14]">
+    <div className="flex flex-col h-full bg-transparent">
       {/* ── Compact header ─────────────────────────────────── */}
       <div className="shrink-0 px-4 py-3 border-b border-white/[0.04]">
         <div className="flex items-center justify-between mb-2">
@@ -138,7 +138,7 @@ export function BuildingView() {
       {streamingFile ? (
         <StreamingCodePanel />
       ) : (
-        <div className="flex-1 min-h-0 overflow-y-auto bg-[#09090f]">
+        <div className="flex-1 min-h-0 overflow-y-auto bg-black/20">
           <div className="px-4 py-3">
             <AgentActivityTimeline />
           </div>

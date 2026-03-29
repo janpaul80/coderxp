@@ -277,7 +277,7 @@ export function ApiProviderModal({ open, onClose }: ApiProviderModalProps) {
       <div className="fixed z-50 inset-0 flex items-center justify-center p-4 pointer-events-none">
         <div className={cn(
           'pointer-events-auto w-full max-w-md',
-          'bg-[#0c0c18] border border-white/[0.08] rounded-2xl shadow-card-lg',
+          'bg-[#1D1D1D] border border-white/[0.08] rounded-2xl shadow-card-lg',
           'flex flex-col max-h-[85vh]'
         )}>
 

@@ -1,5 +1,5 @@
 import React, { useRef, useState, useCallback, useEffect } from 'react'
-import { Send, Paperclip, Mic, MicOff, X, FileText, FileCode, FileImage, File, Plug, Shield } from 'lucide-react'
+import { Send, Paperclip, Mic, MicOff, X, FileText, FileCode, FileImage, File } from 'lucide-react'
 import { useChatStore } from '@/store/chatStore'
 import { useAppStore } from '@/store/appStore'
 import { useSocket } from '@/hooks/useSocket'
@@ -8,8 +8,6 @@ import { Spinner } from '@/components/ui/Spinner'
 import { mockEngine } from '@/lib/mockEngine'
 import { getSocket } from '@/lib/socket'
 import { projectsApi, chatsApi } from '@/lib/api'
-import { ApiProviderModal } from '@/components/settings/ApiProviderModal'
-import { McpMarketplaceModal } from '@/components/settings/McpMarketplaceModal'
 import type { UploadedFile, UploadedFileType, Project, Chat } from '@/types'
 
 // ─── Helpers ─────────────────────────────────────────────────
@@ -122,8 +120,6 @@ export function ChatInput() {
 
   const [isRecording, setIsRecording] = useState(false)
   const [mediaRecorder, setMediaRecorder] = useState<MediaRecorder | null>(null)
-  const [apiModalOpen, setApiModalOpen] = useState(false)
-  const [mcpModalOpen, setMcpModalOpen] = useState(false)
 
   // Auto-resize textarea — grows with content up to 300px
   useEffect(() => {
@@ -311,40 +307,14 @@ export function ChatInput() {
   const otherFiles = pendingFiles.filter((f) => f.type !== 'image')
 
   return (
-    <div className="px-4 py-3">
-      {/* ── API / MCP toolbar ────────────────────────────────── */}
-      <div className="flex items-center gap-1.5 mb-2">
-        <button
-          onClick={() => setApiModalOpen(true)}
-          className={cn(
-            'flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-2xs font-medium transition-all border',
-            'bg-white/[0.03] border-white/[0.06] text-white/40',
-            'hover:bg-accent/10 hover:border-accent/20 hover:text-accent-light'
-          )}
-        >
-          <Shield className="w-3 h-3" />
-          API
-        </button>
-        <button
-          onClick={() => setMcpModalOpen(true)}
-          className={cn(
-            'flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-2xs font-medium transition-all border',
-            'bg-white/[0.03] border-white/[0.06] text-white/40',
-            'hover:bg-emerald-400/10 hover:border-emerald-400/20 hover:text-emerald-400'
-          )}
-        >
-          <Plug className="w-3 h-3" />
-          MCP
-        </button>
-      </div>
-
+    <div className="px-4 py-3 pb-6">
       {/* ── Input container ────────────────────────────────── */}
       <div className={cn(
-        'flex flex-col rounded-2xl',
-        'bg-base-elevated border transition-all duration-200',
+        'flex flex-col rounded-3xl',
+        'bg-white/[0.04] transition-all duration-200',
         isDisabled
-          ? 'border-white/[0.05] opacity-60'
-          : 'border-white/[0.08] focus-within:border-accent/40 focus-within:shadow-[0_0_0_1px_rgba(124,106,247,0.15)]'
+          ? 'opacity-60'
+          : 'focus-within:bg-white/[0.06] shadow-sm'
       )}>
 
         {/* ── Attached files — inside the box ──────────────── */}
@@ -374,9 +344,10 @@ export function ChatInput() {
             disabled={isDisabled}
             rows={2}
             className={cn(
-              'flex-1 bg-transparent text-sm text-text-primary placeholder:text-text-muted',
-              'resize-none outline-none border-0 border-none appearance-none leading-relaxed',
+              'flex-1 bg-transparent text-[15px] text-[#e8e8e8] placeholder:text-white/30',
+              'resize-none outline-none border-0 appearance-none leading-relaxed',
               'overflow-y-auto scrollbar-none min-h-[48px] max-h-[300px]',
+              'focus:outline-none focus:ring-0 focus-visible:outline-none focus-visible:ring-0',
               'disabled:cursor-not-allowed'
             )}
           />
@@ -396,10 +367,10 @@ export function ChatInput() {
               onClick={() => fileInputRef.current?.click()}
               disabled={isDisabled}
               className={cn(
-                'p-1.5 rounded-lg transition-all duration-150',
+                'p-1.5 rounded-xl transition-all duration-150',
                 pendingFiles.length > 0
-                  ? 'text-accent bg-accent/10'
-                  : 'text-text-muted hover:text-text-secondary hover:bg-white/[0.06]',
+                  ? 'text-white bg-white/10'
+                  : 'text-white/40 hover:text-white hover:bg-white/[0.08]',
                 'disabled:opacity-40 disabled:cursor-not-allowed'
               )}
               title="Attach file"
@@ -412,10 +383,10 @@ export function ChatInput() {
               onClick={toggleRecording}
               disabled={isDisabled}
               className={cn(
-                'p-1.5 rounded-lg transition-all duration-150',
+                'p-1.5 rounded-xl transition-all duration-150',
                 isRecording
                   ? 'text-error bg-error/10 hover:bg-error/15'
-                  : 'text-text-muted hover:text-text-secondary hover:bg-white/[0.06]',
+                  : 'text-white/40 hover:text-white hover:bg-white/[0.08]',
                 'disabled:opacity-40 disabled:cursor-not-allowed'
               )}
               title={isRecording ? 'Stop recording' : 'Voice input'}
@@ -428,10 +399,10 @@ export function ChatInput() {
               onClick={handleSend}
               disabled={!canSend}
               className={cn(
-                'p-1.5 rounded-lg transition-all duration-150',
+                'p-1.5 rounded-xl transition-all duration-150',
                 canSend
-                  ? 'bg-accent text-white hover:bg-accent-light shadow-glow-accent'
-                  : 'text-text-muted bg-white/[0.04]',
+                  ? 'bg-white text-black hover:bg-white/90 shadow-md'
+                  : 'text-white/20 bg-white/[0.02]',
                 'disabled:opacity-40 disabled:cursor-not-allowed'
               )}
               title="Send message"
@@ -441,7 +412,6 @@ export function ChatInput() {
           </div>
         </div>
       </div>
-
       {/* ── Hint ───────────────────────────────────────────── */}
       <p className="text-2xs text-text-muted text-center mt-2">
         Press{' '}
@@ -449,10 +419,6 @@ export function ChatInput() {
         {' · '}
         <kbd className="px-1 py-0.5 rounded bg-white/[0.06] font-mono text-2xs">Shift+Enter</kbd> for new line
       </p>
-
-      {/* ── Modals ────────────────────────────────────────── */}
-      <ApiProviderModal open={apiModalOpen} onClose={() => setApiModalOpen(false)} />
-      <McpMarketplaceModal open={mcpModalOpen} onClose={() => setMcpModalOpen(false)} />
     </div>
   )
 }

@@ -27,10 +27,9 @@ function WelcomeState() {
       <div className="flex flex-col items-center text-center flex-1 justify-center">
         {/* Logo mark */}
         <div className="relative mb-5">
-          <div className="w-14 h-14 rounded-2xl bg-accent/15 border border-accent/25 flex items-center justify-center float">
-            <Zap className="w-7 h-7 text-accent" />
+          <div className="w-14 h-14 rounded-2xl bg-white/[0.04] border border-white/[0.08] flex items-center justify-center float">
+            <Zap className="w-7 h-7 text-white/50" />
           </div>
-          <div className="absolute inset-0 rounded-2xl bg-accent/10 blur-xl" />
         </div>
 
         <h2 className="text-lg font-semibold text-text-primary mb-2">
@@ -49,9 +48,9 @@ function WelcomeState() {
               key={i}
               onClick={() => setInputValue(chip.prompt)}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-full whitespace-nowrap
-                bg-base-elevated border border-white/[0.08]
-                hover:border-accent/30 hover:bg-accent/[0.06]
-                text-xs text-text-secondary hover:text-text-primary
+                bg-white/[0.03] border border-white/[0.06]
+                hover:border-white/[0.2] hover:bg-white/[0.08]
+                text-xs text-white/50 hover:text-white/90
                 transition-all duration-150 shrink-0"
             >
               {chip.label}

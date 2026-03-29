@@ -10,11 +10,11 @@ const config: Config = {
       colors: {
         // ── Base backgrounds ──────────────────────────────────
         base: {
-          DEFAULT: '#080810',
-          surface: '#0d0d1a',
-          elevated: '#12121f',
-          card: '#161625',
-          hover: '#1a1a2e',
+          DEFAULT: '#09090b',
+          surface: '#121215',
+          elevated: '#18181b',
+          card: '#1c1c1f',
+          hover: '#27272a',
         },
         // ── Borders ───────────────────────────────────────────
         border: {

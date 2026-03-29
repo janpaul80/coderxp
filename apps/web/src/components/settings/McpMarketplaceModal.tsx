@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react'
-import { X, Search, Download, Check, ExternalLink, Tag } from 'lucide-react'
+import { X, Search, Download, Check, ExternalLink, Tag, Folder, Github, Database, Globe, Brain, MessageSquare, Box, Map, CreditCard, AlertCircle, Plug } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 // ─── MCP Server definitions ─────────────────────────────────
@@ -11,7 +11,7 @@ interface McpServer {
   description: string
   category: string
   tags: string[]
-  icon: string
+  icon: React.ReactNode
 }
 
 const MCP_CATALOG: McpServer[] = [
@@ -22,7 +22,7 @@ const MCP_CATALOG: McpServer[] = [
     description: 'Read, write, and manage local files and directories',
     category: 'Tools',
     tags: ['files', 'local', 'core'],
-    icon: '📁',
+    icon: <Folder className="w-4 h-4" />,
   },
   {
     id: 'github',
@@ -31,7 +31,7 @@ const MCP_CATALOG: McpServer[] = [
     description: 'GitHub repository access, PRs, issues, and code search',
     category: 'Code',
     tags: ['git', 'repos', 'ci'],
-    icon: '🐙',
+    icon: <Github className="w-4 h-4" />,
   },
   {
     id: 'postgres',
@@ -40,7 +40,7 @@ const MCP_CATALOG: McpServer[] = [
     description: 'Query and manage PostgreSQL databases',
     category: 'Database',
     tags: ['sql', 'database', 'query'],
-    icon: '🐘',
+    icon: <Database className="w-4 h-4" />,
   },
   {
     id: 'brave-search',
@@ -49,7 +49,7 @@ const MCP_CATALOG: McpServer[] = [
     description: 'Web and local search via Brave Search API',
     category: 'Search',
     tags: ['web', 'search', 'browse'],
-    icon: '🔍',
+    icon: <Search className="w-4 h-4" />,
   },
   {
     id: 'puppeteer',
@@ -58,7 +58,7 @@ const MCP_CATALOG: McpServer[] = [
     description: 'Browser automation, screenshots, and web scraping',
     category: 'Browser',
     tags: ['browser', 'automation', 'scrape'],
-    icon: '🎭',
+    icon: <Globe className="w-4 h-4" />,
   },
   {
     id: 'memory',
@@ -67,7 +67,7 @@ const MCP_CATALOG: McpServer[] = [
     description: 'Persistent memory storage using knowledge graph',
     category: 'Tools',
     tags: ['memory', 'storage', 'context'],
-    icon: '🧠',
+    icon: <Brain className="w-4 h-4" />,
   },
   {
     id: 'slack',
@@ -76,7 +76,7 @@ const MCP_CATALOG: McpServer[] = [
     description: 'Read and send messages in Slack workspaces',
     category: 'Communication',
     tags: ['chat', 'messaging', 'team'],
-    icon: '💬',
+    icon: <MessageSquare className="w-4 h-4" />,
   },
   {
     id: 'sqlite',
@@ -85,7 +85,7 @@ const MCP_CATALOG: McpServer[] = [
     description: 'Create and query SQLite databases',
     category: 'Database',
     tags: ['sql', 'database', 'local'],
-    icon: '🗄️',
+    icon: <Database className="w-4 h-4" />,
   },
   {
     id: 'docker',
@@ -94,7 +94,7 @@ const MCP_CATALOG: McpServer[] = [
     description: 'Manage Docker containers, images, and networks',
     category: 'DevOps',
     tags: ['containers', 'deployment', 'infra'],
-    icon: '🐳',
+    icon: <Box className="w-4 h-4" />,
   },
   {
     id: 'google-maps',
@@ -103,7 +103,7 @@ const MCP_CATALOG: McpServer[] = [
     description: 'Geocoding, directions, and place search',
     category: 'API',
     tags: ['maps', 'geo', 'location'],
-    icon: '🗺️',
+    icon: <Map className="w-4 h-4" />,
   },
   {
     id: 'stripe',
@@ -112,7 +112,7 @@ const MCP_CATALOG: McpServer[] = [
     description: 'Manage Stripe payments, subscriptions, and customers',
     category: 'API',
     tags: ['payments', 'billing', 'commerce'],
-    icon: '💳',
+    icon: <CreditCard className="w-4 h-4" />,
   },
   {
     id: 'sentry',
@@ -121,7 +121,7 @@ const MCP_CATALOG: McpServer[] = [
     description: 'Error tracking and performance monitoring',
     category: 'Monitoring',
     tags: ['errors', 'debug', 'observability'],
-    icon: '🔔',
+    icon: <AlertCircle className="w-4 h-4" />,
   },
 ]
 
@@ -192,15 +192,15 @@ export function McpMarketplaceModal({ open, onClose }: McpMarketplaceModalProps)
       <div className="fixed z-50 inset-0 flex items-center justify-center p-4 pointer-events-none">
         <div className={cn(
           'pointer-events-auto w-full max-w-lg',
-          'bg-[#0c0c18] border border-white/[0.08] rounded-2xl shadow-card-lg',
+          'bg-[#1D1D1D] border border-white/[0.08] rounded-2xl shadow-card-lg',
           'flex flex-col max-h-[85vh]'
         )}>
 
           {/* ── Header ──────────────────────────────────── */}
           <div className="flex items-center justify-between px-5 py-4 border-b border-white/[0.06] shrink-0">
             <div className="flex items-center gap-3">
-              <div className="w-8 h-8 rounded-xl bg-emerald-400/15 border border-emerald-400/25 flex items-center justify-center text-sm">
-                🔌
+              <div className="w-8 h-8 rounded-xl bg-emerald-400/15 border border-emerald-400/25 flex items-center justify-center">
+                <Plug className="w-4 h-4 text-emerald-400" />
               </div>
               <div>
                 <h2 className="text-sm font-semibold text-white">MCP Servers</h2>
