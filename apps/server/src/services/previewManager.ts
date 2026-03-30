@@ -226,7 +226,10 @@ export function runNpmInstall(
       if (options?.ignoreScripts) flags.push('--ignore-scripts')
       cmd = 'pnpm'
     } else {
-      const base = ['install', '--prefer-offline', '--no-audit', '--no-fund', '--no-optional']
+      // NOTE: Do NOT use --no-optional here. Vite's native binaries (esbuild
+      // platform packages, @rollup/rollup-linux-x64-gnu) are shipped as optional
+      // dependencies. Skipping them causes "Cannot find module @rollup/rollup-linux-x64-gnu".
+      const base = ['install', '--prefer-offline', '--no-audit', '--no-fund']
       if (options?.legacyPeerDeps) base.push('--legacy-peer-deps')
       if (options?.ignoreScripts) base.push('--ignore-scripts')
       flags = base
@@ -237,18 +240,24 @@ export function runNpmInstall(
     // Both npm and pnpm respect npm_config_* env vars.
     // CI=true is CRITICAL — pnpm aborts with ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY
     // when running in non-interactive contexts (no TTY) without CI=true.
+    //
+    // PATH: prepend workspace's .bin/ so esbuild's install.js finds the workspace
+    // binary (0.21.5) instead of the global esbuild (0.27.3) on the server PATH.
+    // Without this, esbuild's post-install validation fails with:
+    //   Error: Expected "0.21.5" but got "0.27.3"
+    const localBinDir = path.join(workspacePath, 'node_modules', '.bin')
     const installEnv: Record<string, string | undefined> = {
       ...process.env,
       CI: 'true',
       FORCE_COLOR: '0',
       NODE_ENV: 'development',
       npm_config_prefer_offline: 'true',
-      npm_config_optional: 'false',              // skip optional native modules
       npm_config_fetch_timeout: '60000',
       npm_config_fetch_retries: '3',
       npm_config_fetch_retry_mintimeout: '5000',
       npm_config_fetch_retry_maxtimeout: '30000',
       npm_config_progress: 'false',
+      PATH: `${localBinDir}${path.delimiter}${process.env.PATH ?? ''}`,
     }
 
     const flagStr = flags.slice(1).join(' ')
@@ -372,22 +381,37 @@ export async function waitForHealthy(
   url: string,
   onLog: (log: PreviewLogEntry) => void,
   callbacks?: PreviewTelemetryCallbacks,
-  timeoutMs: number = HEALTH_CHECK_TIMEOUT_MS
+  timeoutMs: number = HEALTH_CHECK_TIMEOUT_MS,
+  childProcess?: ChildProcess
 ): Promise<boolean> {
   const start = Date.now()
   let attempt = 0
   const timeoutSec = Math.round(timeoutMs / 1000)
 
+  // Track whether the child process has exited (e.g. Vite crashed on startup).
+  // If so, bail immediately instead of polling for the full timeout.
+  let processExited = false
+  let processExitCode: number | null = null
+  const onExit = (code: number | null) => { processExited = true; processExitCode = code }
+  childProcess?.once('exit', onExit)
+
   onLog(makePreviewLog(jobId, 'info', `HEALTH CHECK waiting for ${url} (timeout: ${timeoutSec}s)`))
   callbacks?.onPhase?.('healthcheck', { url, timeoutMs })
 
   while (Date.now() - start < timeoutMs) {
+    // Early exit: Vite process already crashed — no point continuing to poll
+    if (processExited) {
+      onLog(makePreviewLog(jobId, 'error', `HEALTH CHECK aborted: Vite process exited with code ${processExitCode} after ${attempt} attempts`))
+      childProcess?.removeListener('exit', onExit)
+      return false
+    }
     attempt++
     try {
       const status = await httpGet(url)
       if (status >= 200 && status < 400) {
         const elapsed = ((Date.now() - start) / 1000).toFixed(1)
         onLog(makePreviewLog(jobId, 'success', `HEALTH CHECK passed (HTTP ${status}) after ${elapsed}s, ${attempt} attempts`))
+        childProcess?.removeListener('exit', onExit)
         return true
       }
       onLog(makePreviewLog(jobId, 'run', `HEALTH CHECK attempt ${attempt}: HTTP ${status} — retrying...`))
@@ -397,6 +421,7 @@ export async function waitForHealthy(
     await new Promise(r => setTimeout(r, HEALTH_CHECK_INTERVAL_MS))
   }
 
+  childProcess?.removeListener('exit', onExit)
   onLog(makePreviewLog(jobId, 'error', `HEALTH CHECK timed out after ${timeoutSec}s (${attempt} attempts)`))
   // Note: onFailure is NOT called here — caller decides whether to repair or fail
   return false
@@ -564,6 +589,9 @@ export async function startPreview(
     }
 
     // ─ Attempt 3: ignore-scripts last resort ─
+    // --ignore-scripts skips ALL post-install scripts, including the native binary
+    // downloads for esbuild and rollup. After install succeeds, we manually run
+    // just the esbuild post-install to download the correct platform binary.
     installAttempt = 3
     safeRemoveNodeModules(workspacePath)
 
@@ -572,6 +600,49 @@ export async function startPreview(
       isRetry: true,
       ignoreScripts: true,
     })
+
+    // ── Post-install fixup: download native binaries that --ignore-scripts skipped ──
+    // esbuild and rollup need platform-specific native binaries installed via their
+    // post-install scripts. Without these, Vite crashes with:
+    //   "Cannot find module @rollup/rollup-linux-x64-gnu"
+    // or esbuild's binary version check fails.
+    onLog(makePreviewLog(jobId, 'info', 'REPAIR: running native binary post-install fixup (esbuild + rollup)'))
+    const fixupEnv = {
+      ...process.env,
+      CI: 'true',
+      FORCE_COLOR: '0',
+      // Prepend workspace bin to PATH so esbuild's install.js validates the right binary
+      PATH: `${path.join(workspacePath, 'node_modules', '.bin')}${path.delimiter}${process.env.PATH ?? ''}`,
+    }
+    // esbuild: its install.js downloads the platform binary
+    const esbuildInstallJs = path.join(workspacePath, 'node_modules', 'esbuild', 'install.js')
+    if (fs.existsSync(esbuildInstallJs)) {
+      try {
+        execSync(`node "${esbuildInstallJs}"`, { cwd: workspacePath, env: fixupEnv, timeout: 30000, stdio: 'pipe' })
+        onLog(makePreviewLog(jobId, 'success', 'FIXUP: esbuild native binary installed'))
+      } catch (e) {
+        onLog(makePreviewLog(jobId, 'info', `FIXUP: esbuild post-install failed (non-fatal): ${e instanceof Error ? e.message.slice(0, 200) : ''}`))
+      }
+    }
+
+    // rollup: install the platform-specific native module that --ignore-scripts skipped.
+    // Without it, Vite crashes with "Cannot find module @rollup/rollup-linux-x64-gnu".
+    const rollupPlatform = process.platform === 'linux' ? 'linux' : process.platform === 'darwin' ? 'darwin' : 'win32'
+    const rollupArch = process.arch === 'x64' ? 'x64' : process.arch === 'arm64' ? 'arm64' : 'x64'
+    const rollupAbi = process.platform === 'linux' ? 'gnu' : ''
+    const rollupPkg = `@rollup/rollup-${rollupPlatform}-${rollupArch}${rollupAbi ? `-${rollupAbi}` : ''}`
+    const rollupPkgDir = path.join(workspacePath, 'node_modules', '@rollup', `rollup-${rollupPlatform}-${rollupArch}${rollupAbi ? `-${rollupAbi}` : ''}`)
+    if (!fs.existsSync(rollupPkgDir)) {
+      try {
+        onLog(makePreviewLog(jobId, 'info', `FIXUP: installing ${rollupPkg} (native binary for rollup)`))
+        execSync(`npm install ${rollupPkg} --no-save --no-audit --no-fund`, {
+          cwd: workspacePath, env: fixupEnv, timeout: 30000, stdio: 'pipe',
+        })
+        onLog(makePreviewLog(jobId, 'success', `FIXUP: ${rollupPkg} installed`))
+      } catch (e) {
+        onLog(makePreviewLog(jobId, 'info', `FIXUP: ${rollupPkg} install failed (non-fatal): ${e instanceof Error ? e.message.slice(0, 200) : ''}`))
+      }
+    }
   }
   await installWithRetry()
   const installDurationMs = Date.now() - installStart
@@ -604,7 +675,7 @@ export async function startPreview(
   // indefinitely (it queues the request until pre-bundling completes but never
   // responds within our 3s probe timeout), so we must NOT probe that path here.
   onLog(makePreviewLog(jobId, 'info', `HEALTH CHECK probing root URL (vite listening check): ${rootUrl}`))
-  let healthy = await waitForHealthy(jobId, rootUrl, onLog, callbacks, HEALTH_CHECK_TIMEOUT_MS)
+  let healthy = await waitForHealthy(jobId, rootUrl, onLog, callbacks, HEALTH_CHECK_TIMEOUT_MS, child)
 
   if (!healthy) {
     onLog(makePreviewLog(jobId, 'info', `REPAIR: health check timed out at 60s — extending to 120s`))
@@ -614,7 +685,7 @@ export async function startPreview(
       reason: 'Health check timed out at 60s (vite pre-bundling still in progress)',
       strategy: 'extended-timeout-120s',
     })
-    healthy = await waitForHealthy(jobId, rootUrl, onLog, callbacks, HEALTH_CHECK_TIMEOUT_EXTENDED_MS)
+    healthy = await waitForHealthy(jobId, rootUrl, onLog, callbacks, HEALTH_CHECK_TIMEOUT_EXTENDED_MS, child)
   }
 
   if (!healthy) {

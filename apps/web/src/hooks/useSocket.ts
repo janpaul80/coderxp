@@ -86,6 +86,9 @@ export function useSocket() {
 
     // ── Chat events ───────────────────────────────────────
     s.on('chat:message', (message: Message) => {
+      // Skip user messages — they're already added optimistically by ChatInput.
+      // The server echo has a different ID so dedup-by-id doesn't catch it.
+      if (message.role === 'user') return
       addMessage(message)
       setAssistantTyping(false)
     })
