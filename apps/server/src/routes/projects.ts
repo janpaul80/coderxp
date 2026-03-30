@@ -4,7 +4,7 @@ import { PrismaClient } from '@prisma/client'
 import { z } from 'zod'
 import { requireAuth, AuthRequest } from '../middleware/auth'
 
-const router = Router()
+export const router: Router = Router()
 const prisma = new PrismaClient()
 
 const createProjectSchema = z.object({

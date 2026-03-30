@@ -26,7 +26,7 @@ import {
 import { getProviderStatus, ProviderError } from '../lib/providers'
 import { getUserRules, getProjectRules, buildRulesBlock, getRepoSnapshot, buildRepoContext } from '../services/memory'
 
-const router = Router()
+export const router: Router = Router()
 
 // ─── Schemas ──────────────────────────────────────────────────
 

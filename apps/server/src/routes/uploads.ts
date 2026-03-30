@@ -8,7 +8,7 @@ import rateLimit from 'express-rate-limit'
 import { requireAuth, AuthRequest } from '../middleware/auth'
 import { prisma } from '../lib/prisma'
 
-const router = Router()
+export const router: Router = Router()
 
 // ─── Rate limiter: 20 uploads per hour per user ───────────────
 
