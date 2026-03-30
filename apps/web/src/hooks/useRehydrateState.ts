@@ -47,45 +47,63 @@ export function useRehydrateState() {
         const activeJob = activeData.job as Record<string, unknown> | null
 
         if (activeJob) {
-          const jobId = activeJob.id as string
-          const status = activeJob.status as string
-          const progress = (activeJob.progress as number) ?? 0
-          const currentStep = (activeJob.currentStep as string) ?? ''
-          const previewUrl = (activeJob.previewUrl as string | null) ?? null
-          const projectId = activeJob.projectId as string
+          // Guard: don't restore jobs that haven't been updated recently.
+          // Stale jobs from a previous server session should not auto-restore
+          // the BuildingView — they are effectively dead and will be cleaned up
+          // server-side on next restart.
+          const STALE_JOB_THRESHOLD_MS = 30 * 60 * 1000 // 30 minutes
+          const jobUpdatedAt = activeJob.updatedAt
+            ? new Date(activeJob.updatedAt as string).getTime()
+            : 0
+          const isStale = jobUpdatedAt > 0 && Date.now() - jobUpdatedAt > STALE_JOB_THRESHOLD_MS
 
-          // Restore active job into store
-          setActiveJob({
-            id: jobId,
-            projectId,
-            planId: (activeJob.planId as string) ?? '',
-            status: status as import('@/types').JobStatus,
-            currentStep,
-            progress,
-            logs: [],
-            startedAt: activeJob.startedAt as string | undefined,
-            previewUrl: previewUrl ?? undefined,
-            previewPort: (activeJob.previewPort as number | undefined),
-            previewStatus: (activeJob.previewStatus as string | undefined),
-            error: (activeJob.error as string | undefined),
-            errorDetails: (activeJob.errorDetails as string | undefined),
-            failureCategory: (activeJob.failureCategory as string | undefined),
-          })
+          if (isStale) {
+            console.warn(
+              `[Rehydrate] Skipping stale job ${activeJob.id as string} ` +
+              `(last updated ${Math.round((Date.now() - jobUpdatedAt) / 60000)} min ago)`
+            )
+            // Fall through to check for completed jobs instead
+          } else {
+            const jobId = activeJob.id as string
+            const status = activeJob.status as string
+            const progress = (activeJob.progress as number) ?? 0
+            const currentStep = (activeJob.currentStep as string) ?? ''
+            const previewUrl = (activeJob.previewUrl as string | null) ?? null
+            const projectId = activeJob.projectId as string
 
-          // Restore panel progress
-          setPanelProgress({
-            jobId,
-            status: status as import('@/types').JobStatus,
-            currentStep,
-            progress,
-            recentLogs: [],
-            failureCategory: (activeJob.failureCategory as string | undefined),
-          })
+            // Restore active job into store
+            setActiveJob({
+              id: jobId,
+              projectId,
+              planId: (activeJob.planId as string) ?? '',
+              status: status as import('@/types').JobStatus,
+              currentStep,
+              progress,
+              logs: [],
+              startedAt: activeJob.startedAt as string | undefined,
+              previewUrl: previewUrl ?? undefined,
+              previewPort: (activeJob.previewPort as number | undefined),
+              previewStatus: (activeJob.previewStatus as string | undefined),
+              error: (activeJob.error as string | undefined),
+              errorDetails: (activeJob.errorDetails as string | undefined),
+              failureCategory: (activeJob.failureCategory as string | undefined),
+            })
 
-          // Transition to building view
-          transitionToBuilding(jobId)
-          console.log(`[Rehydrate] Restored building state for job ${jobId} (${status})`)
-          return
+            // Restore panel progress
+            setPanelProgress({
+              jobId,
+              status: status as import('@/types').JobStatus,
+              currentStep,
+              progress,
+              recentLogs: [],
+              failureCategory: (activeJob.failureCategory as string | undefined),
+            })
+
+            // Transition to building view
+            transitionToBuilding(jobId)
+            console.log(`[Rehydrate] Restored building state for job ${jobId} (${status})`)
+            return
+          }
         }
 
         // ── Step 2: Check for last completed job ──────────────

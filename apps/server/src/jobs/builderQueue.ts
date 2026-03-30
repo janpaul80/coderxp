@@ -152,8 +152,7 @@ try {
   queueInstance = new Queue('builder', {
     connection: redisConnection,
     defaultJobOptions: {
-      attempts: 2,
-      backoff: { type: 'exponential', delay: 5000 },
+      attempts: 1,           // No auto-retry — user must explicitly request repair
       removeOnComplete: 100,
       removeOnFail: 50,
     },
@@ -164,6 +163,74 @@ try {
 }
 
 export const builderQueue = queueInstance
+
+// ─── Stale job cleanup on startup ────────────────────────────
+// When the server restarts, BullMQ may still have jobs queued in Redis from a
+// previous session. These orphaned jobs would auto-execute against stale/missing
+// workspaces, causing builds to fire on page load with no user input.
+// This function drains leftover Redis jobs and marks non-terminal Postgres jobs
+// as failed so they don't auto-trigger.
+
+export async function cleanupStaleJobsOnStartup(): Promise<void> {
+  try {
+    // ── Step 1: Drain leftover BullMQ jobs from Redis ──────────
+    if (queueInstance) {
+      const waiting = await queueInstance.getWaiting()
+      const delayed = await queueInstance.getDelayed()
+      const staleJobs = [...waiting, ...delayed]
+
+      if (staleJobs.length > 0) {
+        console.log(`[Builder] Cleaning up ${staleJobs.length} stale BullMQ job(s) from Redis...`)
+        for (const job of staleJobs) {
+          try {
+            await job.remove()
+          } catch {
+            // Job may have already been picked up — ignore
+          }
+        }
+        console.log(`[Builder] Stale BullMQ jobs removed`)
+      }
+    }
+
+    // ── Step 2: Mark orphaned non-terminal Postgres jobs as failed ──
+    // Any job stuck in a non-terminal state from a previous server session
+    // will never complete. Mark them failed so useRehydrateState doesn't
+    // restore a "Building" view for a dead build.
+    const STALE_THRESHOLD_MS = 30 * 60 * 1000 // 30 minutes
+    const cutoff = new Date(Date.now() - STALE_THRESHOLD_MS)
+
+    const orphanedJobs = await prisma.job.findMany({
+      where: {
+        status: {
+          in: [
+            'queued', 'initializing', 'installing',
+            'generating_frontend', 'generating_backend',
+            'wiring_auth', 'wiring_integrations',
+            'running', 'testing', 'installing_deps',
+            'starting_preview', 'repairing',
+          ] as JobStatus[],
+        },
+        updatedAt: { lt: cutoff },
+      },
+      select: { id: true, status: true, projectId: true, updatedAt: true },
+    })
+
+    if (orphanedJobs.length > 0) {
+      console.log(`[Builder] Marking ${orphanedJobs.length} orphaned job(s) as failed (stale > 30 min)...`)
+      await prisma.job.updateMany({
+        where: { id: { in: orphanedJobs.map(j => j.id) } },
+        data: {
+          status: 'failed' as JobStatus,
+          error: 'Server restarted — build was orphaned and could not continue.',
+          failureCategory: 'server_restart',
+        },
+      })
+      console.log(`[Builder] Orphaned jobs marked as failed`)
+    }
+  } catch (err) {
+    console.warn('[Builder] Stale job cleanup failed (non-fatal):', err instanceof Error ? err.message : err)
+  }
+}
 
 // ─── Socket helpers ───────────────────────────────────────────
 
@@ -178,7 +245,8 @@ function emitProgress(
   status: string,
   label: string,
   progress: number,
-  logs: unknown[]
+  logs: unknown[],
+  workspacePath?: string | null,
 ) {
   emitToUser(userId, 'job:updated', {
     id: jobId,
@@ -186,6 +254,7 @@ function emitProgress(
     currentStep: label,
     progress,
     logs,
+    workspacePath: workspacePath ?? null,
   })
 }
 
@@ -332,6 +401,8 @@ try {
         // Hoisted so catch block can access for memory writes
         let planRecord: { summary: unknown } | null = null
         let projectRecord: { name: string } | null = null
+        // Hoisted workspace path — set after createWorkspace(), used by emitProgress
+        let jobWorkspacePath: string | null = null
 
         // ── Helpers ──────────────────────────────────────────
 
@@ -369,7 +440,7 @@ try {
             retryCount,
             ...(patch ?? {}),
           })
-          emitProgress(userId, jobId, status, currentStep, progress, allLogs)
+          emitProgress(userId, jobId, status, currentStep, progress, allLogs, jobWorkspacePath)
 
           // ── Emit agent status based on build phase ──
           const stepToAgent: Record<string, AgentRole> = {
@@ -549,6 +620,7 @@ try {
 
           currentPhase = 'workspace'
           const workspacePath = createWorkspace(jobId)
+          jobWorkspacePath = workspacePath  // make available to emitProgress
           await addLog('info', `WORKSPACE ${workspacePath}`, 'workspace_prepare', { workspacePath })
 
           const features = Array.isArray(plan.features) ? plan.features as string[] : []
@@ -756,7 +828,20 @@ try {
           // ── Phase 1: AI Code Generation ─────────────────────
           currentPhase = 'scaffold'
           await addLog('info', 'Starting AI code generation', 'scaffold_generate', {})
-          await generateProjectFiles(workspacePath, codeGenProject, codeGenCallbacks)
+
+          // Master timeout: if generateProjectFiles hasn't returned in 120s,
+          // abort and proceed with whatever files were already generated.
+          // This is the absolute backstop — individual file timeouts should
+          // resolve much faster, but this catches any unforeseen hang.
+          const MASTER_CODEGEN_TIMEOUT_MS = 120_000
+          const codeGenPromise = generateProjectFiles(workspacePath, codeGenProject, codeGenCallbacks)
+          const codeGenTimer = new Promise<void>((resolve) => {
+            setTimeout(() => {
+              console.error(`[Builder] ⚠ MASTER CODEGEN TIMEOUT (${MASTER_CODEGEN_TIMEOUT_MS / 1000}s) — proceeding with generated files so far`)
+              resolve()
+            }, MASTER_CODEGEN_TIMEOUT_MS)
+          })
+          await Promise.race([codeGenPromise, codeGenTimer])
 
           // Execute post:generate plugin hooks (write plugin file templates, etc.)
           if (activePlugins.length > 0) {
@@ -901,11 +986,16 @@ try {
                 // Ensure pnpm isolation files exist (match previewManager.runNpmInstall)
                 if (PKG_MANAGER === 'pnpm') {
                   const npmrcPath = nodePath.join(workspacePath, '.npmrc')
-                  fs.writeFileSync(npmrcPath, 'node-linker=hoisted\nshamefully-hoist=true\nprefer-offline=true\n')
+                  fs.writeFileSync(npmrcPath, 'node-linker=hoisted\nshamefully-hoist=true\nprefer-offline=true\nshared-workspace-lockfile=false\n')
                   const wsYaml = nodePath.join(workspacePath, 'pnpm-workspace.yaml')
                   if (!fs.existsSync(wsYaml)) {
                     fs.writeFileSync(wsYaml, 'packages: []\n')
                   }
+                }
+                // Remove stale lockfiles before install
+                for (const lf of ['pnpm-lock.yaml', 'package-lock.json']) {
+                  const lfp = nodePath.join(workspacePath, lf)
+                  try { if (fs.existsSync(lfp)) fs.unlinkSync(lfp) } catch {}
                 }
                 try {
                   const installCmd = PKG_MANAGER === 'pnpm'
@@ -1364,11 +1454,16 @@ try {
               // Ensure pnpm isolation files exist (match previewManager.runNpmInstall)
               if (PKG_MANAGER === 'pnpm') {
                 const npmrcPath = nodePath.join(workspacePath, '.npmrc')
-                fs.writeFileSync(npmrcPath, 'node-linker=hoisted\nshamefully-hoist=true\nprefer-offline=true\n')
+                fs.writeFileSync(npmrcPath, 'node-linker=hoisted\nshamefully-hoist=true\nprefer-offline=true\nshared-workspace-lockfile=false\n')
                 const wsYaml = nodePath.join(workspacePath, 'pnpm-workspace.yaml')
                 if (!fs.existsSync(wsYaml)) {
                   fs.writeFileSync(wsYaml, 'packages: []\n')
                 }
+              }
+              // Remove stale lockfiles before recovery install
+              for (const lf of ['pnpm-lock.yaml', 'package-lock.json']) {
+                const lfp = nodePath.join(workspacePath, lf)
+                try { if (fs.existsSync(lfp)) fs.unlinkSync(lfp) } catch {}
               }
               try {
                 const recoverCmd = PKG_MANAGER === 'pnpm'
@@ -1487,11 +1582,15 @@ try {
             previewPid: previewInstance.pid,
           })
 
+          // Store the browser-accessible relative URL (not localhost) in the DB
+          // so that /api/preview/:jobId/status and rehydration both return a usable URL.
+          const browserPreviewUrl = `/api/preview/${jobId}/app/`
+
           await setJobStep(jobId, {
             status: 'complete',
             currentStep: 'Preview ready',
             progress: 100,
-            previewUrl: previewInstance.url,
+            previewUrl: browserPreviewUrl,
             previewPort: previewInstance.port,
             previewPid: previewInstance.pid,
             previewStatus: 'ready',
@@ -1516,17 +1615,20 @@ try {
 
           emitToUser(userId, 'job:complete', {
             jobId,
-            previewUrl: previewInstance.url,
+            previewUrl: browserPreviewUrl,
             previewPort: previewInstance.port,
             previewPid: previewInstance.pid,
+            fileCount: fileTree.length,
+            totalBytes,
+            keyFiles: generatedKeyFiles,
           })
           emitPipelineStatus('complete', 'Build complete', {
             totalFiles: generatedFiles.length,
-            previewUrl: previewInstance.url,
+            previewUrl: browserPreviewUrl,
           })
           emitToUser(userId, 'preview:ready', {
             jobId,
-            url: previewInstance.url,
+            url: browserPreviewUrl,
             port: previewInstance.port,
             pid: previewInstance.pid,
           })

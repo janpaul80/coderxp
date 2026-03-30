@@ -32,6 +32,7 @@ import { visualBuilderRouter } from './routes/visualBuilder'
 import { apiKeysRouter } from './routes/apiKeys'
 import { registerSocketEvents } from './socket/events'
 import { cleanupAllPreviews, startPreviewLifecycleManager, stopPreviewLifecycleManager } from './services/previewManager'
+import { cleanupStaleJobsOnStartup } from './jobs/builderQueue'
 import { cleanupAllSessions } from './services/browserControl'
 import { getProviderStatus } from './lib/providers'
 import { getAgentRegistry } from './agents'
@@ -180,6 +181,10 @@ httpServer.listen(PORT, () => {
   startHealthPolling()
   // Start preview lifecycle manager (auto-kill previews older than 2h)
   startPreviewLifecycleManager()
+  // Clean up stale jobs from previous server sessions — prevents auto-build on page load
+  cleanupStaleJobsOnStartup().catch((err) => {
+    console.warn('[Server] Stale job cleanup failed (non-fatal):', err)
+  })
 })
 
 // ─── Graceful shutdown ────────────────────────────────────────
