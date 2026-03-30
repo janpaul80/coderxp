@@ -480,10 +480,14 @@ try {
               await setStep('starting_preview', 'Starting preview server', 97, { previewStatus: 'starting' })
             } else if (phase === 'healthcheck') {
               await setStep('starting_preview', 'Waiting for preview to become ready', 98, { previewStatus: 'starting' })
+            } else if (phase === 'warmup') {
+              await setStep('starting_preview', 'Warming up preview (compiling dependencies)', 99, { previewStatus: 'warming_up' })
+              emitAgentStatus('installer', 'running', 'Warming up preview — Vite is compiling your app...')
             }
             const logStep: BuildLogStep =
               phase === 'installing' ? 'install_deps'
               : phase === 'starting' ? 'preview_start'
+              : phase === 'warmup' ? 'preview_start'
               : 'preview_healthcheck'
             await addLog('info', `phase:${phase}`, logStep, meta ?? {})
           },
@@ -1586,6 +1590,7 @@ try {
           // ── Pre-completion content validation ───────────────────────────
           // Verify the preview is actually serving content, not a blank page.
           // If blank/broken, auto-repair silently before the user ever sees it.
+          emitAgentStatus('installer', 'running', 'Verifying preview renders correctly...')
           const contentCheck = await validatePreviewContent(
             previewInstance.url,
             (msg) => addLog('info', msg, 'complete'),

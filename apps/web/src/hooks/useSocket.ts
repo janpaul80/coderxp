@@ -268,6 +268,16 @@ export function useSocket() {
         message: error.message,
         failureCategory: error.category,
       })
+      // Add a conversational failure message to the chat thread
+      const failMsg: Message = {
+        id: `failed-${_jobId}-${Date.now()}`,
+        chatId: '',
+        role: 'assistant',
+        type: 'text',
+        content: `The build didn't make it this time. ${error.message}\n\nYou can describe what went wrong or ask me to try again with different settings.`,
+        createdAt: new Date().toISOString(),
+      }
+      addMessage(failMsg)
     })
 
     // ── Streaming file tokens ─────────────────────────────
