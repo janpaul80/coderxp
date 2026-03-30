@@ -778,3 +778,26 @@ function handlePreviewProxy(req: Request, res: Response): void {
 
 previewRouter.get('/:jobId/app', handlePreviewProxy)
 previewRouter.get('/:jobId/app/*', handlePreviewProxy)
+
+// ─── Backend API proxy ──────────────────────────────────────
+// Proxies /api/preview/:jobId/backend/* to the Express backend server
+// running on backendPort (vitePort + 1000). This lets the generated frontend
+// make API calls through CoderXP's server without CORS issues.
+
+function handleBackendProxy(req: Request, res: Response): void {
+  const { jobId } = req.params
+  const subPath = (req.params as Record<string, string>)[0] ?? ''
+  const queryString = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : ''
+
+  const instance = getPreviewInstance(jobId)
+  if (!instance || !instance.backendPort) {
+    res.status(503).json({ error: 'Backend not running for this preview' })
+    return
+  }
+
+  const targetUrl = `http://localhost:${instance.backendPort}/${subPath}${queryString}`
+  req.headers.host = `localhost:${instance.backendPort}`
+  proxyToUrl(req, res, targetUrl)
+}
+
+previewRouter.all('/:jobId/backend/*', handleBackendProxy)

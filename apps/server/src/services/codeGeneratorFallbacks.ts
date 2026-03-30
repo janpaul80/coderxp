@@ -340,10 +340,10 @@ export function fallbackServerIndex(project: CodeGenProject): string {
     '',
     'const app = express()',
     'const PORT = process.env.PORT ?? 3001',
-    'const CLIENT_URL = process.env.CLIENT_URL ?? "http://localhost:5173"',
     '',
-    'app.use(helmet())',
-    'app.use(cors({ origin: CLIENT_URL, credentials: true }))',
+    'app.use(helmet({ contentSecurityPolicy: false }))',
+    '// Allow all origins in development/preview mode',
+    'app.use(cors({ origin: true, credentials: true }))',
     'app.use(morgan("dev"))',
   )
 
@@ -452,8 +452,10 @@ export function fallbackPrismaSchema(project: CodeGenProject): string {
     '}',
     '',
     'datasource db {',
-    '  provider = "postgresql"',
-    '  url      = env("DATABASE_URL")',
+    '  // SQLite for preview — zero config, file-based.',
+    '  // Switch to "postgresql" + DATABASE_URL for production.',
+    '  provider = "sqlite"',
+    '  url      = "file:./dev.db"',
     '}',
     '',
   ]

@@ -38,6 +38,9 @@ export interface PreviewInstance {
   startedAt: Date
   installDurationMs?: number
   startDurationMs?: number
+  backendPort?: number
+  backendPid?: number
+  backendProcess?: ChildProcess
 }
 
 export interface PreviewLogEntry {
@@ -752,6 +755,41 @@ export async function startPreview(
   await installWithRetry()
   const installDurationMs = Date.now() - installStart
 
+  // ── Step 1b: Prisma setup (when schema exists) ──────────────
+  // Generate the Prisma client and push the schema to create the SQLite database.
+  // This makes login/register/CRUD actually work in preview.
+  const prismaSchemaPath = path.join(workspacePath, 'prisma', 'schema.prisma')
+  const hasPrisma = fs.existsSync(prismaSchemaPath)
+  if (hasPrisma) {
+    onLog(makePreviewLog(jobId, 'info', 'PRISMA: generating client and creating database...'))
+    const prismaEnv = {
+      ...process.env,
+      CI: 'true',
+      FORCE_COLOR: '0',
+      PATH: `${path.join(workspacePath, 'node_modules', '.bin')}${path.delimiter}${process.env.PATH ?? ''}`,
+    }
+    try {
+      execSync('npx prisma generate', { cwd: workspacePath, env: prismaEnv, timeout: 30000, stdio: 'pipe' })
+      onLog(makePreviewLog(jobId, 'success', 'PRISMA: client generated'))
+    } catch (e) {
+      onLog(makePreviewLog(jobId, 'info', `PRISMA: generate failed (non-fatal): ${e instanceof Error ? e.message.slice(0, 200) : ''}`))
+    }
+    try {
+      execSync('npx prisma db push --accept-data-loss', { cwd: workspacePath, env: prismaEnv, timeout: 30000, stdio: 'pipe' })
+      onLog(makePreviewLog(jobId, 'success', 'PRISMA: database created (SQLite)'))
+    } catch (e) {
+      onLog(makePreviewLog(jobId, 'info', `PRISMA: db push failed (non-fatal): ${e instanceof Error ? e.message.slice(0, 200) : ''}`))
+    }
+  }
+
+  // ── Step 1c: Start Express backend (when server/index.ts exists) ──
+  // The backend runs on backendPort = vitePort + 1000 so both servers run concurrently.
+  const serverIndexPath = path.join(workspacePath, 'server', 'index.ts')
+  const hasBackend = fs.existsSync(serverIndexPath)
+  let backendProcess: ChildProcess | undefined
+  let backendPort: number | undefined
+  let backendPid: number | undefined
+
   // Step 2: allocate port
   const port = await allocatePort()
   // Root URL — vite responds to this immediately with a 302 redirect (before pre-bundling).
@@ -763,6 +801,57 @@ export async function startPreview(
   const viteBase = `/api/preview/${jobId}/app/`
   const appUrl = `${rootUrl}${viteBase}`
   onLog(makePreviewLog(jobId, 'info', `PORT allocated: ${port}`))
+
+  // ── Start Express backend (when server/index.ts exists) ─────────
+  if (hasBackend) {
+    backendPort = port + 1000
+    onLog(makePreviewLog(jobId, 'info', `BACKEND: starting Express server on port ${backendPort}...`))
+
+    // Write a .env file for the backend with the port and JWT secret
+    const backendEnvPath = path.join(workspacePath, '.env')
+    const backendEnvContent = [
+      `PORT=${backendPort}`,
+      `CLIENT_URL=http://localhost:${port}`,
+      `JWT_SECRET=preview-secret-${jobId.slice(0, 8)}`,
+      `NODE_ENV=development`,
+    ].join('\n')
+    fs.writeFileSync(backendEnvPath, backendEnvContent)
+
+    const backendEnv = {
+      ...process.env,
+      PORT: String(backendPort),
+      NODE_ENV: 'development',
+      CI: 'true',
+      FORCE_COLOR: '0',
+      PATH: `${path.join(workspacePath, 'node_modules', '.bin')}${path.delimiter}${process.env.PATH ?? ''}`,
+    }
+
+    try {
+      backendProcess = spawn('npx', ['tsx', 'server/index.ts'], {
+        cwd: workspacePath,
+        env: backendEnv,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        shell: true,
+      })
+      backendPid = backendProcess.pid ?? 0
+      onLog(makePreviewLog(jobId, 'success', `BACKEND: Express started (PID: ${backendPid}, port: ${backendPort})`))
+
+      // Pipe backend output to logs
+      backendProcess.stdout?.on('data', (data: Buffer) => {
+        const msg = data.toString().trim()
+        if (msg) onLog(makePreviewLog(jobId, 'info', `[backend] ${msg}`, 'stdout'))
+      })
+      backendProcess.stderr?.on('data', (data: Buffer) => {
+        const msg = data.toString().trim()
+        if (msg) onLog(makePreviewLog(jobId, 'info', `[backend] ${msg}`, 'stderr'))
+      })
+      backendProcess.on('exit', (code) => {
+        onLog(makePreviewLog(jobId, code === 0 ? 'info' : 'error', `[backend] Process exited with code ${code}`))
+      })
+    } catch (e) {
+      onLog(makePreviewLog(jobId, 'info', `BACKEND: failed to start (non-fatal): ${e instanceof Error ? e.message.slice(0, 200) : ''}`))
+    }
+  }
 
   // Step 3: start Vite
   const viteStart = Date.now()
@@ -864,6 +953,9 @@ export async function startPreview(
     startedAt: new Date(),
     installDurationMs,
     startDurationMs,
+    backendPort,
+    backendPid,
+    backendProcess,
   }
 
   previews.set(jobId, instance)
@@ -1043,6 +1135,11 @@ export function stopPreview(jobId: string): boolean {
   if (!instance) return false
 
   killProcess(instance.process, instance.pid)
+
+  // Also kill the backend process if running
+  if (instance.backendProcess && instance.backendPid) {
+    killProcess(instance.backendProcess, instance.backendPid)
+  }
 
   instance.status = 'stopped'
   freePort(instance.port)

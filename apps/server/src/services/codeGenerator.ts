@@ -5,8 +5,7 @@
  * using the Blackbox AI API. Falls back to enhanced templates if AI unavailable.
  */
 
-// AI provider imports — kept for when AI generation is re-enabled
-// import { complete, isProviderAvailable } from '../lib/providers'
+import { completeStream, complete, isProviderAvailable } from '../lib/providers'
 import { detectProjectType, type ProjectType } from './designSystem'
 import { writeWorkspaceFile } from './workspace'
 import { validateAllIntegrations } from './integrationValidation'
@@ -124,17 +123,65 @@ const MAX_CONSECUTIVE_FAILURES = 1  // After 1 timeout, skip all remaining AI ca
 async function generateFileWithAI(
   userPrompt: string,
   maxTokens = 8192,
-  _onToken?: (delta: string) => void,
+  onToken?: (delta: string) => void,
 ): Promise<string | null> {
-  // ┌──────────────────────────────────────────────────────────────┐
-  // │ TEMPLATE-FIRST MODE                                          │
-  // │ Skip AI entirely and use template fallbacks for ALL files.   │
-  // │ This guarantees the build pipeline completes in seconds.     │
-  // │ Once the full pipeline is proven working end-to-end,         │
-  // │ AI generation can be re-enabled by removing this block.      │
-  // └──────────────────────────────────────────────────────────────┘
-  console.log('[CodeGen] Template-first mode: skipping AI, using fallback template')
-  return null
+  // Fast-fail: if a previous file timed out or the overall generation timer
+  // has triggered, skip AI and fall back to template immediately.
+  if (_forceTemplateFallback) {
+    console.log('[CodeGen] Force-template mode active — using fallback')
+    return null
+  }
+
+  // Check if any provider is available at all
+  if (!isProviderAvailable('blackbox') && !isProviderAvailable('openclaw') && !isProviderAvailable('langdock') && !isProviderAvailable('openrouter')) {
+    console.log('[CodeGen] No AI provider available — using fallback template')
+    return null
+  }
+
+  try {
+    const result = await withTimeout(
+      onToken
+        ? completeStream({
+            role: 'fallback',
+            systemPrompt: AI_SYSTEM_PROMPT,
+            userPrompt,
+            maxTokens,
+            temperature: 0.3,
+            onToken: (delta) => onToken(delta),
+          })
+        : complete({
+            role: 'fallback',
+            systemPrompt: AI_SYSTEM_PROMPT,
+            userPrompt,
+            maxTokens,
+            temperature: 0.3,
+          }),
+      PER_FILE_AI_TIMEOUT_MS,
+      'AI file generation',
+    )
+
+    _consecutiveAiFailures = 0  // Reset on success
+
+    const code = extractCode(result.content)
+    if (!code || code.length < 20) {
+      console.warn(`[CodeGen] AI returned empty/too-short response (${code.length} chars) — using fallback`)
+      return null
+    }
+
+    console.log(`[CodeGen] AI generated ${code.length} chars via ${result.provider}/${result.model} in ${result.durationMs}ms`)
+    return code
+  } catch (err) {
+    _consecutiveAiFailures++
+    const errMsg = err instanceof Error ? err.message : String(err)
+    console.warn(`[CodeGen] AI generation failed (attempt ${_consecutiveAiFailures}/${MAX_CONSECUTIVE_FAILURES + 1}): ${errMsg}`)
+
+    if (_consecutiveAiFailures > MAX_CONSECUTIVE_FAILURES) {
+      console.warn(`[CodeGen] ${_consecutiveAiFailures} consecutive failures — switching to template fallback for remaining files`)
+      _forceTemplateFallback = true
+    }
+
+    return null
+  }
 }
 
 // ─── Scope → Page mapping ─────────────────────────────────────
@@ -429,7 +476,7 @@ export function buildFileSpecs(
 // Overall generation timeout: if the entire AI generation phase exceeds this,
 // remaining files use template fallbacks. Prevents the build from hanging forever.
 // Reduced from 180s to 90s — if AI is working, most files generate in 5-15s each.
-const OVERALL_AI_GENERATION_TIMEOUT_MS = 90_000 // 90 seconds for all AI files
+const OVERALL_AI_GENERATION_TIMEOUT_MS = 120_000 // 120 seconds for all AI files
 
 export async function generateProjectFiles(
   workspaceId: string,
@@ -515,6 +562,7 @@ export async function generateProjectFiles(
     }
 
     try {
+      const wasFallbackBefore = _forceTemplateFallback
       const fileStart = Date.now()
       const content = await spec.generate()
       const fileMs = Date.now() - fileStart
@@ -522,7 +570,8 @@ export async function generateProjectFiles(
 
       writeWorkspaceFile(workspaceId, spec.relativePath, content)
       const bytes = Buffer.byteLength(content, 'utf8')
-      const generatedBy = _forceTemplateFallback || content.includes('// fallback') ? 'template' : 'ai'
+      // If fallback was already forced before generate(), this file used a template.
+      const generatedBy = spec.isTemplate || wasFallbackBefore ? 'template' : 'ai'
       generated.push({ relativePath: spec.relativePath, content, generatedBy, bytes })
       await callbacks.onFileComplete(spec.relativePath, bytes, generatedBy)
     } catch (err) {

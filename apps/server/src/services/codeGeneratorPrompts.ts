@@ -511,7 +511,7 @@ If the DATABASE INTELLIGENCE specifies ownership fields (userId), include @relat
 Generate prisma/schema.prisma for "${project.projectName}".
 Requirements:
 - generator client: provider = "prisma-client-js"
-- datasource db: provider = "postgresql", url = env("DATABASE_URL")
+- datasource db: provider = "sqlite", url = "file:./dev.db" (SQLite for preview, switch to postgresql for production)
 - Every model: @id @default(cuid()), createdAt DateTime @default(now()), updatedAt DateTime @updatedAt
 - User model: id, name, email @unique, password, createdAt, updatedAt
 - User-owned models: userId String + @relation(fields:[userId], references:[id], onDelete:Cascade) + @@index([userId])
