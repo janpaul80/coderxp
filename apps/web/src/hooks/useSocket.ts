@@ -55,6 +55,8 @@ export function useSocket() {
     clearBrowserSession,
     appendStreamingFileToken,
     clearStreamingFile,
+    pushTerminalLog,
+    pushCompletedFile,
     pushAgentStatus,
     pushFileChange,
     setAgentSnapshot,
@@ -137,6 +139,7 @@ export function useSocket() {
       if (current?.jobId === jobId) {
         // Normalize: server sends BuildLogEntry { level, step, message } — map to frontend JobLog { type, message }
         const rawStep = (log as unknown as { step?: string }).step
+        const rawSource = (log as unknown as { source?: string }).source
         const normalizedLog: JobLog = {
           id: log?.id ?? `log-${Date.now()}`,
           timestamp: log?.timestamp ?? new Date().toISOString(),
@@ -149,6 +152,26 @@ export function useSocket() {
           ...current,
           recentLogs: [...(current.recentLogs ?? []).slice(-49), normalizedLog],
         })
+
+        // Push to live terminal log — every build log is visible in the terminal
+        pushTerminalLog({
+          id: normalizedLog.id,
+          timestamp: normalizedLog.timestamp,
+          type: normalizedLog.type,
+          message: normalizedLog.message,
+          step: rawStep,
+          source: rawSource,
+        })
+
+        // Track completed files for live file tree
+        if (normalizedLog.filePath && (normalizedLog.type === 'create' || normalizedLog.type === 'success')) {
+          const rawBytes = (log as unknown as { bytes?: number }).bytes
+          pushCompletedFile({
+            path: normalizedLog.filePath,
+            bytes: rawBytes,
+            timestamp: normalizedLog.timestamp,
+          })
+        }
       }
     })
 
@@ -418,6 +441,21 @@ export function useSocket() {
 
     s.on('agent:fileChange', (payload: FileChangePayload) => {
       pushFileChange(payload)
+      // Also track in completed files for live file tree
+      if (payload.action === 'created' || payload.action === 'modified') {
+        pushCompletedFile({
+          path: payload.filePath,
+          timestamp: payload.timestamp,
+        })
+      }
+      // And show in terminal
+      pushTerminalLog({
+        id: `fc-${Date.now()}-${payload.filePath}`,
+        timestamp: payload.timestamp,
+        type: payload.action === 'created' ? 'create' : 'update',
+        message: `${payload.action}: ${payload.filePath}`,
+        source: payload.agent,
+      })
     })
 
     s.on('agent:snapshot', (snapshot: AgentProgressSnapshot) => {
@@ -490,6 +528,8 @@ export function useSocket() {
     clearBrowserSession,
     appendStreamingFileToken,
     clearStreamingFile,
+    pushTerminalLog,
+    pushCompletedFile,
     pushAgentStatus,
     pushFileChange,
     setAgentSnapshot,

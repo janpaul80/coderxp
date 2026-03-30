@@ -89,6 +89,16 @@ interface AppStore {
   appendStreamingFileToken: (path: string, delta: string) => void
   clearStreamingFile: () => void
 
+  // Live terminal log — real command output, install logs, errors visible during build
+  terminalLogs: Array<{ id: string; timestamp: string; type: string; message: string; step?: string; source?: string }>
+  pushTerminalLog: (entry: { id: string; timestamp: string; type: string; message: string; step?: string; source?: string }) => void
+  clearTerminalLogs: () => void
+
+  // Completed files list — tracks files as they are created live
+  completedFiles: Array<{ path: string; bytes?: number; timestamp: string }>
+  pushCompletedFile: (entry: { path: string; bytes?: number; timestamp: string }) => void
+  clearCompletedFiles: () => void
+
   // Build summary (populated on job:complete, cleared on resetToIdle)
   buildSummary: BuildSummary | null
   setBuildSummary: (summary: BuildSummary | null) => void
@@ -289,6 +299,32 @@ export const useAppStore = create<AppStore>()(
         ),
       clearStreamingFile: () =>
         set({ streamingFile: null }, false, 'clearStreamingFile'),
+
+      // ── Live terminal logs ─────────────────────────────────
+      terminalLogs: [],
+      pushTerminalLog: (entry) =>
+        set(
+          (state) => ({
+            terminalLogs: [...state.terminalLogs, entry].slice(-500),
+          }),
+          false,
+          'pushTerminalLog'
+        ),
+      clearTerminalLogs: () =>
+        set({ terminalLogs: [] }, false, 'clearTerminalLogs'),
+
+      // ── Completed files ────────────────────────────────────
+      completedFiles: [],
+      pushCompletedFile: (entry) =>
+        set(
+          (state) => ({
+            completedFiles: [...state.completedFiles, entry].slice(-200),
+          }),
+          false,
+          'pushCompletedFile'
+        ),
+      clearCompletedFiles: () =>
+        set({ completedFiles: [] }, false, 'clearCompletedFiles'),
 
       // ── Build summary ─────────────────────────────────────
       buildSummary: null,
@@ -498,6 +534,8 @@ export const useAppStore = create<AppStore>()(
             testResults: null,
             securityAudit: null,
             streamingFile: null,
+            terminalLogs: [],
+            completedFiles: [],
             pendingCredentialRequest: null,
             pendingContinuationSuggestion: null,
             pendingRepairSuggestion: null,
