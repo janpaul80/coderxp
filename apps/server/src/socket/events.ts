@@ -60,64 +60,20 @@ function formatPlanAsConversation(plan: {
   backendScope?: string[] | null
   executionSteps?: Array<{ title: string; description?: string }> | null
 }): string {
-  const lines: string[] = []
+  // Keep it short and natural — 2-3 sentences max. The build starts immediately.
+  const summary = plan.summary ?? 'Building your app'
 
-  // Summary — the agent's voice
-  if (plan.summary) {
-    lines.push(plan.summary)
-    lines.push('')
-  }
-
-  // Features
-  const features = plan.features ?? []
-  if (features.length > 0) {
-    lines.push("Here's what I'll build for you:")
-    lines.push('')
-    for (const f of features) {
-      lines.push(`- ${f}`)
-    }
-    lines.push('')
-  }
-
-  // Tech stack — mentioned naturally
   const allTech = [
     ...(plan.techStack?.frontend ?? []),
     ...(plan.techStack?.backend ?? []),
     ...(plan.techStack?.database ?? []),
   ]
-  const integrations = plan.integrations ?? []
-  if (allTech.length > 0 || integrations.length > 0) {
-    const parts = [...allTech, ...integrations]
-    lines.push(`**Tech stack:** ${parts.join(', ')}`)
-    lines.push('')
-  }
+  const techMention = allTech.length > 0 ? ` using ${allTech.slice(0, 3).join(', ')}` : ''
 
-  // Pages / endpoints
-  const pages = plan.frontendScope ?? []
-  const endpoints = plan.backendScope ?? []
-  if (pages.length > 0) {
-    lines.push(`**Pages:** ${pages.join(', ')}`)
-  }
-  if (endpoints.length > 0) {
-    lines.push(`**API endpoints:** ${endpoints.join(', ')}`)
-  }
-  if (pages.length > 0 || endpoints.length > 0) lines.push('')
+  const featureCount = (plan.features ?? []).length
+  const featureHint = featureCount > 0 ? ` with ${featureCount} features` : ''
 
-  // Execution steps
-  const steps = plan.executionSteps ?? []
-  if (steps.length > 0) {
-    lines.push('**How I\'ll build it:**')
-    lines.push('')
-    steps.forEach((step, i) => {
-      const desc = step.description ? ` — ${step.description}` : ''
-      lines.push(`${i + 1}. ${step.title}${desc}`)
-    })
-    lines.push('')
-  }
-
-  lines.push('Ready to build? Just approve and I\'ll get started.')
-
-  return lines.join('\n')
+  return `${summary}${featureHint}${techMention}. Starting the build now — you'll see files appear in real time.`
 }
 
 // ─── Active job statuses (used for one-active-build + concurrent limit guards) ──
@@ -926,11 +882,10 @@ async function handleWithAI(
           canContinue: true,
         })
       } else {
-        // No complete job found — fall through to build_request
-        const response = `I don't see a completed build to extend yet. Let me create a fresh plan for you instead.`
-        await persistAndEmitAssistantMessage(socket, chatId, response, 'text')
+        // No complete job found — re-route as a fresh build (auto-approve, no approval gate)
+        await persistAndEmitAssistantMessage(socket, chatId,
+          `No existing build to extend — starting a fresh one for you.`, 'text')
 
-        // Re-route as build_request
         const { plan: planOutput, metadata } = await generatePlan({
           userRequest: content,
           chatHistory,
@@ -955,12 +910,14 @@ async function handleWithAI(
               status: 'pending',
             })),
             estimatedComplexity: planOutput.estimatedComplexity,
-            status: 'pending_approval',
+            status: 'approved',
+            approvedAt: new Date(),
           },
         })
         await savePlannerRun({ chatId, projectId, planId: plan.id, userRequest: content, metadata })
+
         const planConvo = formatPlanAsConversation(plan)
-        const message = await prisma.message.create({
+        const msg = await prisma.message.create({
           data: {
             chatId,
             role: 'assistant',
@@ -969,8 +926,41 @@ async function handleWithAI(
             metadata: { planId: plan.id },
           },
         })
-        socket.emit('plan:created', plan)
-        socket.emit('chat:message', { ...message, metadata: { planId: plan.id, plan } })
+        socket.emit('chat:message', { ...msg, metadata: { planId: plan.id, plan } })
+
+        // Auto-approve: create and dispatch the build job immediately
+        const activeJobCheck = await prisma.job.findFirst({
+          where: { projectId, status: { in: [...ACTIVE_JOB_STATUSES] } },
+        })
+        if (!activeJobCheck) {
+          const job = await prisma.job.create({
+            data: { projectId, planId: plan.id, status: 'queued' },
+          })
+          await prisma.project.update({
+            where: { id: projectId },
+            data: { status: 'building' },
+          })
+          socket.emit('job:created', job)
+
+          const strategy = createExecutionStrategy(
+            typeof plan.summary === 'string' ? plan.summary : '',
+            { mode: 'build', existingPlan: plan as Record<string, unknown> }
+          )
+          emitPipelineStatus('running', `Build started: ${strategy.activeAgents.length} agents activated`, {
+            totalTasks: strategy.tasks.length,
+            completedTasks: 0,
+            activeAgents: strategy.activeAgents,
+          })
+
+          const selection = selectWorker(builderQueue!)
+          await prisma.job.update({
+            where: { id: job.id },
+            data: { workerName: selection.workerName, workerSelectedReason: selection.selectedReason },
+          })
+          await selection.queue.add('build', {
+            jobId: job.id, projectId, planId: plan.id, userId, socketId: socket.id,
+          })
+        }
       }
       return
     }
@@ -1130,8 +1120,11 @@ async function handleWithAI(
           console.log(`[Socket] Auto-approved build job ${job.id} on ${autoSelection.queueName}`)
         }
       } catch (autoErr) {
-        console.error('[Socket] Auto-approve failed, falling back to manual approval:', autoErr)
-        socket.emit('plan:created', plan)
+        console.error('[Socket] Auto-approve failed:', autoErr)
+        await persistAndEmitAssistantMessage(socket, chatId,
+          'Something went wrong starting the build. Please try again.',
+          'text'
+        )
       }
     } catch (err) {
       if (err instanceof LLMUnavailableError) {

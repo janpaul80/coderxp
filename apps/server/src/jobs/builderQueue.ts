@@ -263,6 +263,19 @@ function emitLog(userId: string, jobId: string, log: unknown) {
   emitToUser(userId, 'job:log', { jobId, log })
 }
 
+/** Emit a short, transient chat message so the chat thread feels alive during builds. */
+function emitProgressChat(userId: string, jobId: string, content: string) {
+  emitToUser(userId, 'chat:message', {
+    id: `build-progress-${jobId}-${Date.now()}`,
+    chatId: '',
+    role: 'assistant',
+    type: 'text',
+    content,
+    createdAt: new Date().toISOString(),
+    metadata: { transient: true },
+  })
+}
+
 // ─── Agent status bridge ─────────────────────────────────────
 // Maps build phases to agent roles and emits agent:status events
 // so the frontend AgentStatusPanel stays in sync with the real build.
@@ -476,8 +489,10 @@ try {
           onPhase: async (phase, meta) => {
             if (phase === 'installing') {
               await setStep('installing_deps', 'Installing dependencies', 90, { previewStatus: 'installing' })
+              emitProgressChat(userId, jobId, 'Installing dependencies — setting up the runtime...')
             } else if (phase === 'starting') {
               await setStep('starting_preview', 'Starting preview server', 97, { previewStatus: 'starting' })
+              emitProgressChat(userId, jobId, 'Starting the preview server — almost there...')
             } else if (phase === 'healthcheck') {
               await setStep('starting_preview', 'Waiting for preview to become ready', 98, { previewStatus: 'starting' })
             } else if (phase === 'warmup') {
@@ -627,6 +642,7 @@ try {
           const workspacePath = createWorkspace(jobId)
           jobWorkspacePath = workspacePath  // make available to emitProgress
           await addLog('info', `WORKSPACE ${workspacePath}`, 'workspace_prepare', { workspacePath })
+          emitProgressChat(userId, jobId, 'Setting up workspace and analyzing your project requirements...')
 
           const features = Array.isArray(plan.features) ? plan.features as string[] : []
           const techStack = (plan.techStack as Record<string, string[]>) ?? {}
@@ -833,6 +849,7 @@ try {
           // ── Phase 1: AI Code Generation ─────────────────────
           currentPhase = 'scaffold'
           await addLog('info', 'Starting AI code generation', 'scaffold_generate', {})
+          emitProgressChat(userId, jobId, 'Writing code — generating components, pages, and logic...')
 
           // Master timeout: if generateProjectFiles hasn't returned in 120s,
           // abort and proceed with whatever files were already generated.
@@ -887,6 +904,7 @@ try {
           // ── Phase 2: Workspace Validation ───────────────────
           currentPhase = 'scaffold_validate'
           await setStep('testing', 'Validating workspace', 88)
+          emitProgressChat(userId, jobId, `Code generation done — ${generatedFiles.length} files written. Validating and wiring up the project...`)
           const fileTree = getWorkspaceFileTree(workspacePath)
           const totalBytes = getWorkspaceTotalBytes(workspacePath)
 

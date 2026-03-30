@@ -228,27 +228,15 @@ function UserMessage({ message }: { message: Message }) {
 // ─── Assistant message ────────────────────────────────────────
 
 function formatPlanToMarkdown(plan: Record<string, unknown>): string {
-  const lines: string[] = []
-  const summary = plan.summary as string | undefined
-  if (summary) { lines.push(summary, '') }
-  const features = plan.features as string[] | undefined
-  if (features?.length) {
-    lines.push("Here's what I'll build for you:", '')
-    features.forEach(f => lines.push(`- ${f}`))
-    lines.push('')
-  }
+  // Keep it short — the plan auto-approves and builds immediately.
+  // No essay, no "approve and I'll get started" — just a brief summary.
+  const summary = (plan.summary as string | undefined) ?? 'Building your app'
   const ts = plan.techStack as { frontend?: string[]; backend?: string[]; database?: string[] } | undefined
-  const integrations = plan.integrations as string[] | undefined
-  const allTech = [...(ts?.frontend ?? []), ...(ts?.backend ?? []), ...(ts?.database ?? []), ...(integrations ?? [])]
-  if (allTech.length) { lines.push(`**Tech stack:** ${allTech.join(', ')}`, '') }
-  const steps = plan.executionSteps as Array<{ title: string; description?: string }> | undefined
-  if (steps?.length) {
-    lines.push("**How I'll build it:**", '')
-    steps.forEach((s, i) => lines.push(`${i + 1}. ${s.title}${s.description ? ` — ${s.description}` : ''}`))
-    lines.push('')
-  }
-  lines.push('Ready to build? Just approve and I\'ll get started.')
-  return lines.join('\n')
+  const allTech = [...(ts?.frontend ?? []), ...(ts?.backend ?? []), ...(ts?.database ?? [])]
+  const techMention = allTech.length > 0 ? ` using ${allTech.slice(0, 3).join(', ')}` : ''
+  const featureCount = (plan.features as string[] | undefined)?.length ?? 0
+  const featureHint = featureCount > 0 ? ` with ${featureCount} features` : ''
+  return `${summary}${featureHint}${techMention}. Starting the build now — you'll see files appear in real time.`
 }
 
 function AssistantMessage({ message }: { message: Message }) {
