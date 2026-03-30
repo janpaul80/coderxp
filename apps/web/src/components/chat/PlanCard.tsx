@@ -1,116 +1,13 @@
 import React, { useState } from 'react'
-import {
-  ChevronDown, ChevronUp, Layers, Code2, Server, Plug, Database,
-  ListChecks, Cpu, BarChart3, Zap
-} from 'lucide-react'
-import { Badge } from '@/components/ui/Badge'
+import { ChevronDown, ChevronRight, Zap, CheckCircle2 } from 'lucide-react'
 import { ApprovalControls } from './ApprovalControls'
 import { cn } from '@/lib/utils'
-import type { Plan, ExecutionStep } from '@/types'
+import type { Plan } from '@/types'
 
-// ─── Section ──────────────────────────────────────────────────
-
-function Section({
-  icon,
-  title,
-  children,
-  defaultOpen = true,
-}: {
-  icon: React.ReactNode
-  title: string
-  children: React.ReactNode
-  defaultOpen?: boolean
-}) {
-  const [open, setOpen] = useState(defaultOpen)
-
-  return (
-    <div className="plan-section">
-      <button
-        onClick={() => setOpen(!open)}
-        className="w-full flex items-center justify-between py-1 group"
-      >
-        <div className="flex items-center gap-2">
-          <span className="text-text-muted">{icon}</span>
-          <span className="text-xs font-semibold text-text-secondary uppercase tracking-wider">
-            {title}
-          </span>
-        </div>
-        {open ? (
-          <ChevronUp className="w-3.5 h-3.5 text-text-muted" />
-        ) : (
-          <ChevronDown className="w-3.5 h-3.5 text-text-muted" />
-        )}
-      </button>
-      {open && <div className="mt-2 pb-1">{children}</div>}
-    </div>
-  )
-}
-
-// ─── Tag list ─────────────────────────────────────────────────
-
-function TagList({ items }: { items: string[] }) {
-  if (!items || items.length === 0) return null
-  return (
-    <div className="flex flex-wrap gap-1.5">
-      {items.map((item, i) => (
-        <Badge key={i} variant="default" size="sm">
-          {item}
-        </Badge>
-      ))}
-    </div>
-  )
-}
-
-// ─── Execution steps ──────────────────────────────────────────
-
-function ExecutionSteps({ steps }: { steps: ExecutionStep[] }) {
-  return (
-    <div className="space-y-1.5">
-      {steps.map((step, i) => (
-        <div key={step.id} className="flex items-start gap-2.5">
-          <div className={cn(
-            'w-5 h-5 rounded-full border flex items-center justify-center shrink-0 mt-0.5',
-            step.status === 'complete' ? 'bg-success/15 border-success/30' :
-            step.status === 'running' ? 'bg-accent/15 border-accent/30' :
-            step.status === 'failed' ? 'bg-error/15 border-error/30' :
-            'bg-white/[0.04] border-white/[0.10]'
-          )}>
-            <span className={cn(
-              'text-2xs font-bold',
-              step.status === 'complete' ? 'text-success' :
-              step.status === 'running' ? 'text-accent' :
-              step.status === 'failed' ? 'text-error' :
-              'text-text-muted'
-            )}>
-              {i + 1}
-            </span>
-          </div>
-          <div className="flex-1 min-w-0">
-            <p className="text-xs font-medium text-text-secondary">{step.title}</p>
-            {step.description && (
-              <p className="text-2xs text-text-muted mt-0.5 leading-relaxed">
-                {step.description}
-              </p>
-            )}
-          </div>
-          {step.estimatedDuration && (
-            <span className="text-2xs text-text-muted shrink-0">{step.estimatedDuration}</span>
-          )}
-        </div>
-      ))}
-    </div>
-  )
-}
-
-// ─── Complexity badge ─────────────────────────────────────────
-
-const complexityConfig = {
-  low: { label: 'Low complexity', variant: 'success' as const },
-  medium: { label: 'Medium complexity', variant: 'warning' as const },
-  high: { label: 'High complexity', variant: 'error' as const },
-}
-
-// ─── Plan card ────────────────────────────────────────────────
+// ─── Inline plan message ─────────────────────────────────────
+// Renders the plan as a natural conversational message from the agent.
+// No rigid "card" — the agent talks through what it will build.
+// Details are expandable, approval is inline and compact.
 
 interface PlanCardProps {
   plan: Plan
@@ -118,123 +15,149 @@ interface PlanCardProps {
 }
 
 export function PlanCard({ plan, isActive = false }: PlanCardProps) {
-  const complexity = complexityConfig[plan.estimatedComplexity]
+  const [showDetails, setShowDetails] = useState(false)
+
+  const techFrontend = plan.techStack?.frontend ?? []
+  const techBackend = plan.techStack?.backend ?? []
+  const techDB = plan.techStack?.database ?? []
+  const integrations = plan.integrations ?? []
+  const features = plan.features ?? []
+  const frontendScope = plan.frontendScope ?? []
+  const backendScope = plan.backendScope ?? []
+  const steps = plan.executionSteps ?? []
 
   return (
-    <div className={cn(
-      'plan-card w-full',
-      isActive && 'glow-ring'
-    )}>
-      {/* ── Header ──────────────────────────────────────────── */}
-      <div className="plan-card-header">
-        <div className="flex items-start justify-between gap-3">
-          <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-lg bg-accent/20 border border-accent/25 flex items-center justify-center shrink-0">
-              <Zap className="w-4 h-4 text-accent" />
-            </div>
-            <div>
-              <h3 className="text-sm font-semibold text-text-primary">
-                Build Plan
-              </h3>
-              <p className="text-2xs text-text-muted mt-0.5">
-                Review and approve to begin building
-              </p>
-            </div>
+    <div className="flex items-start gap-3 px-4 py-2">
+      {/* Agent avatar */}
+      <div className="w-6 h-6 rounded-full bg-white/[0.08] border border-white/[0.10] flex items-center justify-center shrink-0 mt-0.5">
+        <Zap className="w-3 h-3 text-white/70" />
+      </div>
+
+      {/* Message bubble */}
+      <div className="flex-1 min-w-0 max-w-[calc(100%-4rem)]">
+        <div className={cn(
+          'rounded-2xl rounded-tl-sm overflow-hidden',
+          'bg-base-elevated border border-white/[0.06]',
+          isActive && 'border-accent/20'
+        )}>
+          {/* Plan content — conversational */}
+          <div className="px-4 py-3 space-y-3">
+            {/* Summary — the agent's voice */}
+            <p className="text-[13px] text-text-primary leading-relaxed">
+              {plan.summary}
+            </p>
+
+            {/* Features list */}
+            {features.length > 0 && (
+              <div>
+                <p className="text-2xs font-semibold text-text-muted uppercase tracking-wider mb-1.5">
+                  What I'll build
+                </p>
+                <ul className="space-y-1">
+                  {features.map((f, i) => (
+                    <li key={i} className="flex items-start gap-2 text-xs text-text-secondary leading-relaxed">
+                      <CheckCircle2 className="w-3 h-3 text-accent/50 mt-0.5 shrink-0" />
+                      <span>{f}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {/* Tech stack — inline tags */}
+            {(techFrontend.length > 0 || techBackend.length > 0 || techDB.length > 0) && (
+              <div className="flex flex-wrap gap-1.5">
+                {[...techFrontend, ...techBackend, ...techDB].map((t, i) => (
+                  <span
+                    key={i}
+                    className="inline-flex items-center px-2 py-0.5 rounded-md bg-white/[0.04] border border-white/[0.06] text-[10px] font-medium text-text-muted"
+                  >
+                    {t}
+                  </span>
+                ))}
+                {integrations.map((t, i) => (
+                  <span
+                    key={`int-${i}`}
+                    className="inline-flex items-center px-2 py-0.5 rounded-md bg-accent/[0.06] border border-accent/[0.10] text-[10px] font-medium text-accent/70"
+                  >
+                    {t}
+                  </span>
+                ))}
+              </div>
+            )}
+
+            {/* Expandable details toggle */}
+            {(steps.length > 0 || frontendScope.length > 0 || backendScope.length > 0) && (
+              <button
+                onClick={() => setShowDetails(!showDetails)}
+                className="flex items-center gap-1 text-2xs text-text-muted hover:text-text-secondary transition-colors"
+              >
+                {showDetails
+                  ? <ChevronDown className="w-3 h-3" />
+                  : <ChevronRight className="w-3 h-3" />
+                }
+                <span>{showDetails ? 'Hide' : 'Show'} execution details</span>
+                {!showDetails && steps.length > 0 && (
+                  <span className="text-text-muted/50 ml-1">({steps.length} steps)</span>
+                )}
+              </button>
+            )}
+
+            {showDetails && (
+              <div className="space-y-2 pt-1 border-t border-white/[0.04]">
+                {steps.length > 0 && (
+                  <div>
+                    <p className="text-2xs font-semibold text-text-muted uppercase tracking-wider mb-1.5">
+                      Execution plan
+                    </p>
+                    <ol className="space-y-1">
+                      {steps.map((step, i) => (
+                        <li key={step.id || i} className="flex items-start gap-2 text-xs text-text-secondary">
+                          <span className="text-text-muted text-2xs font-mono w-4 text-right shrink-0 mt-px">{i + 1}.</span>
+                          <div className="flex-1 min-w-0">
+                            <span className="font-medium">{step.title}</span>
+                            {step.description && (
+                              <span className="text-text-muted ml-1">— {step.description}</span>
+                            )}
+                          </div>
+                        </li>
+                      ))}
+                    </ol>
+                  </div>
+                )}
+
+                {frontendScope.length > 0 && (
+                  <div>
+                    <p className="text-2xs font-semibold text-text-muted uppercase tracking-wider mb-1">Pages</p>
+                    <div className="flex flex-wrap gap-1">
+                      {frontendScope.map((s, i) => (
+                        <span key={i} className="text-[10px] px-1.5 py-0.5 rounded bg-white/[0.03] text-text-muted border border-white/[0.04]">{s}</span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {backendScope.length > 0 && (
+                  <div>
+                    <p className="text-2xs font-semibold text-text-muted uppercase tracking-wider mb-1">API Endpoints</p>
+                    <div className="flex flex-wrap gap-1">
+                      {backendScope.map((s, i) => (
+                        <span key={i} className="text-[10px] px-1.5 py-0.5 rounded bg-white/[0.03] text-text-muted border border-white/[0.04] font-mono">{s}</span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
-          <Badge variant={complexity.variant} size="sm" dot>
-            {complexity.label}
-          </Badge>
-        </div>
 
-        {/* Summary */}
-        <p className="mt-3 text-xs text-text-secondary leading-relaxed">
-          {plan.summary}
-        </p>
-      </div>
-
-      {/* ── Sections ────────────────────────────────────────── */}
-      <div className="divide-y divide-white/[0.04]">
-        {/* Features */}
-        {plan.features?.length > 0 && (
-          <Section icon={<ListChecks className="w-3.5 h-3.5" />} title="Features">
-            <ul className="space-y-1">
-              {plan.features.map((f, i) => (
-                <li key={i} className="flex items-start gap-2 text-xs text-text-secondary">
-                  <span className="text-accent mt-0.5 shrink-0">•</span>
-                  {f}
-                </li>
-              ))}
-            </ul>
-          </Section>
-        )}
-
-        {/* Tech stack */}
-        {plan.techStack && (
-          <Section icon={<Cpu className="w-3.5 h-3.5" />} title="Tech Stack">
-            <div className="space-y-2">
-              {plan.techStack.frontend?.length > 0 && (
-                <div>
-                  <p className="text-2xs text-text-muted mb-1.5 font-medium">Frontend</p>
-                  <TagList items={plan.techStack.frontend} />
-                </div>
-              )}
-              {plan.techStack.backend?.length > 0 && (
-                <div>
-                  <p className="text-2xs text-text-muted mb-1.5 font-medium">Backend</p>
-                  <TagList items={plan.techStack.backend} />
-                </div>
-              )}
-              {(plan.techStack.database?.length ?? 0) > 0 && (
-                <div>
-                  <p className="text-2xs text-text-muted mb-1.5 font-medium">Database</p>
-                  <TagList items={plan.techStack.database ?? []} />
-                </div>
-              )}
-              {(plan.techStack.integrations?.length ?? 0) > 0 && (
-                <div>
-                  <p className="text-2xs text-text-muted mb-1.5 font-medium">Integrations</p>
-                  <TagList items={plan.techStack.integrations ?? []} />
-                </div>
-              )}
+          {/* Approval — compact, inline */}
+          {isActive && plan.status === 'pending_approval' && (
+            <div className="px-4 py-3 border-t border-white/[0.04] bg-white/[0.01]">
+              <ApprovalControls plan={plan} />
             </div>
-          </Section>
-        )}
-
-        {/* Frontend scope */}
-        {plan.frontendScope?.length > 0 && (
-          <Section icon={<Layers className="w-3.5 h-3.5" />} title="Frontend" defaultOpen={false}>
-            <TagList items={plan.frontendScope} />
-          </Section>
-        )}
-
-        {/* Backend scope */}
-        {plan.backendScope?.length > 0 && (
-          <Section icon={<Server className="w-3.5 h-3.5" />} title="Backend" defaultOpen={false}>
-            <TagList items={plan.backendScope} />
-          </Section>
-        )}
-
-        {/* Integrations */}
-        {plan.integrations?.length > 0 && (
-          <Section icon={<Plug className="w-3.5 h-3.5" />} title="Integrations" defaultOpen={false}>
-            <TagList items={plan.integrations} />
-          </Section>
-        )}
-
-        {/* Execution steps */}
-        {plan.executionSteps?.length > 0 && (
-          <Section icon={<BarChart3 className="w-3.5 h-3.5" />} title="Execution Steps" defaultOpen={false}>
-            <ExecutionSteps steps={plan.executionSteps} />
-          </Section>
-        )}
-      </div>
-
-      {/* ── Approval controls ────────────────────────────────── */}
-      {isActive && plan.status === 'pending_approval' && (
-        <div className="px-5 py-4 border-t border-white/[0.06] bg-base-elevated/30">
-          <ApprovalControls plan={plan} />
+          )}
         </div>
-      )}
+      </div>
     </div>
   )
 }

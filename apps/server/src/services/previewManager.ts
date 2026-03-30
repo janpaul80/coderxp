@@ -412,13 +412,58 @@ export function startViteProcess(
   callbacks?: PreviewTelemetryCallbacks
 ): ChildProcess {
   const viteBase = `/api/preview/${jobId}/app/`
-  onLog(makePreviewLog(jobId, 'info', `RUN npx vite --port ${port} --host 0.0.0.0 --base ${viteBase} (cwd: ${workspacePath})`))
+
+  // Use the workspace's local vite binary instead of npx.
+  // npx resolves from the parent monorepo's node_modules, which can have a
+  // different esbuild version than the workspace's own node_modules. This causes
+  // "Host version X does not match binary version Y" EPIPE crashes.
+  const localViteBin = path.join(workspacePath, 'node_modules', '.bin', 'vite')
+  const useLocalBin = fs.existsSync(localViteBin)
+  const viteCmd = useLocalBin ? localViteBin : 'npx'
+  const viteArgs = useLocalBin
+    ? ['--port', String(port), '--host', '0.0.0.0', '--base', viteBase]
+    : ['vite', '--port', String(port), '--host', '0.0.0.0', '--base', viteBase]
+
+  onLog(makePreviewLog(jobId, 'info', `RUN ${useLocalBin ? 'local vite' : 'npx vite'} --port ${port} --host 0.0.0.0 --base ${viteBase} (cwd: ${workspacePath})`))
   callbacks?.onPhase?.('starting', { port, cwd: workspacePath })
 
-  const child = spawn('npx', ['vite', '--port', String(port), '--host', '0.0.0.0', '--base', viteBase], {
+  // Resolve the esbuild binary path from the workspace's own node_modules.
+  // This prevents the "Host version X does not match binary version Y" error
+  // that occurs when Node resolves esbuild from the parent monorepo's pnpm store.
+  const esbuildBinPath = (() => {
+    // esbuild stores its native binary in a platform-specific package
+    const platform = process.platform === 'linux' ? 'linux' : process.platform === 'darwin' ? 'darwin' : 'win32'
+    const arch = process.arch === 'x64' ? 'x64' : process.arch === 'arm64' ? 'arm64' : 'x64'
+    const platformPkg = `@esbuild/${platform}-${arch}`
+    const binName = platform === 'win32' ? 'esbuild.exe' : 'bin/esbuild'
+    const candidate = path.join(workspacePath, 'node_modules', platformPkg, binName)
+    if (fs.existsSync(candidate)) return candidate
+    // Fallback: esbuild's own bin
+    const fallback = path.join(workspacePath, 'node_modules', 'esbuild', 'bin', 'esbuild')
+    if (fs.existsSync(fallback)) return fallback
+    return undefined
+  })()
+
+  if (esbuildBinPath) {
+    onLog(makePreviewLog(jobId, 'info', `ESBUILD binary: ${esbuildBinPath}`))
+  }
+
+  const child = spawn(viteCmd, viteArgs, {
     cwd: workspacePath,
     shell: true,
-    env: { ...process.env, FORCE_COLOR: '0', NODE_ENV: 'development' },
+    env: {
+      ...process.env,
+      FORCE_COLOR: '0',
+      NODE_ENV: 'development',
+      // Isolate the workspace's node resolution from the parent monorepo.
+      // This prevents esbuild/Vite from accidentally loading binaries from
+      // /opt/coderxp-live/node_modules/.pnpm/ which may have mismatched versions.
+      NODE_PATH: path.join(workspacePath, 'node_modules'),
+      // Force esbuild to use the workspace's own native binary.
+      // Without this, Node's module resolution walks up to the parent monorepo
+      // and finds a different esbuild version, causing the EPIPE crash.
+      ...(esbuildBinPath ? { ESBUILD_BINARY_PATH: esbuildBinPath } : {}),
+    },
     detached: false,
   })
 
@@ -454,6 +499,23 @@ export async function startPreview(
 ): Promise<PreviewInstance> {
   const installStart = Date.now()
   emitPreviewStatus('starting', `Preview starting for job ${jobId}`)
+
+  // ── Isolate workspace from parent monorepo's node_modules ──────
+  // Workspaces live under /opt/coderxp-live/apps/server/workspaces/{id}/
+  // which is deep inside the monorepo tree. Without isolation, npm/Node
+  // resolves packages (especially esbuild native binaries) from the parent
+  // node_modules, causing version mismatches like:
+  //   "Host version 0.21.5 does not match binary version 0.27.3"
+  // The .npmrc prevents npm from walking up the tree.
+  const npmrcPath = path.join(workspacePath, '.npmrc')
+  if (!fs.existsSync(npmrcPath)) {
+    fs.writeFileSync(npmrcPath, [
+      '# Isolate from parent monorepo',
+      'global-style=false',
+      'legacy-peer-deps=true',
+      '',
+    ].join('\n'))
+  }
 
   // Step 1: install dependencies — with multi-tier retry fallback
   //

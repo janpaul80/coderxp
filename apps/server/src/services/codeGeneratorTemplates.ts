@@ -22,7 +22,7 @@ export function templatePackageJson(project: CodeGenProject): string {
   if (hasDB) deps['@prisma/client'] = '^5.22.0'
   if (hasStripe) deps['stripe'] = '^17.0.0'
   if (hasSupabase) deps['@supabase/supabase-js'] = '^2.45.0'
-  const devDeps: Record<string, string> = { '@types/react': '^18.3.0', '@types/react-dom': '^18.3.0', '@vitejs/plugin-react': '^4.3.0', typescript: '^5.6.0', vite: '^5.4.0', tailwindcss: '^3.4.0', autoprefixer: '^10.4.0', postcss: '^8.4.0' }
+  const devDeps: Record<string, string> = { '@types/react': '^18.3.0', '@types/react-dom': '^18.3.0', '@vitejs/plugin-react': '^4.3.0', typescript: '^5.6.0', vite: '^5.4.0', esbuild: '^0.21.5', tailwindcss: '^3.4.0', autoprefixer: '^10.4.0', postcss: '^8.4.0' }
   if (hasServer) Object.assign(devDeps, { '@types/express': '^5.0.0', '@types/cors': '^2.8.17', '@types/morgan': '^1.9.9', '@types/node': '^22.0.0', tsx: '^4.19.0', concurrently: '^9.0.0' })
   if (hasAuth) Object.assign(devDeps, { '@types/jsonwebtoken': '^9.0.7', '@types/bcryptjs': '^2.4.6' })
   if (hasDB) devDeps['prisma'] = '^5.22.0'

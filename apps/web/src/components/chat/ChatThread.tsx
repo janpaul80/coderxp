@@ -76,7 +76,10 @@ function AssistantTyping() {
         <Zap className="w-3 h-3 text-accent" />
       </div>
       <div className="bg-base-elevated border border-white/[0.06] rounded-2xl rounded-tl-sm px-4 py-3">
-        <TypingDots />
+        <div className="flex items-center gap-2">
+          <TypingDots />
+          <span className="text-xs text-text-muted">Agent is thinking...</span>
+        </div>
       </div>
     </motion.div>
   )
@@ -114,12 +117,10 @@ export function ChatThread() {
                 transition={{ duration: 0.2 }}
               >
                 {message.type === 'plan' && message.metadata?.plan ? (
-                  <div className="px-4 py-2">
-                    <PlanCard
-                      plan={message.metadata.plan}
-                      isActive={appMode === 'awaiting_approval'}
-                    />
-                  </div>
+                  <PlanCard
+                    plan={message.metadata.plan}
+                    isActive={appMode === 'awaiting_approval'}
+                  />
                 ) : (
                   <ChatMessage message={message} />
                 )}
