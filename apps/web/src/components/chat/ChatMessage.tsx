@@ -227,10 +227,43 @@ function UserMessage({ message }: { message: Message }) {
 
 // ─── Assistant message ────────────────────────────────────────
 
+function formatPlanToMarkdown(plan: Record<string, unknown>): string {
+  const lines: string[] = []
+  const summary = plan.summary as string | undefined
+  if (summary) { lines.push(summary, '') }
+  const features = plan.features as string[] | undefined
+  if (features?.length) {
+    lines.push("Here's what I'll build for you:", '')
+    features.forEach(f => lines.push(`- ${f}`))
+    lines.push('')
+  }
+  const ts = plan.techStack as { frontend?: string[]; backend?: string[]; database?: string[] } | undefined
+  const integrations = plan.integrations as string[] | undefined
+  const allTech = [...(ts?.frontend ?? []), ...(ts?.backend ?? []), ...(ts?.database ?? []), ...(integrations ?? [])]
+  if (allTech.length) { lines.push(`**Tech stack:** ${allTech.join(', ')}`, '') }
+  const steps = plan.executionSteps as Array<{ title: string; description?: string }> | undefined
+  if (steps?.length) {
+    lines.push("**How I'll build it:**", '')
+    steps.forEach((s, i) => lines.push(`${i + 1}. ${s.title}${s.description ? ` — ${s.description}` : ''}`))
+    lines.push('')
+  }
+  lines.push('Ready to build? Just approve and I\'ll get started.')
+  return lines.join('\n')
+}
+
 function AssistantMessage({ message }: { message: Message }) {
   const isSpecial = ['build_complete', 'error', 'repair_start', 'repair_complete', 'credential_request'].includes(message.type)
-  // Use rich markdown for plain text assistant messages (not special status messages)
-  const useRich = message.type === 'text'
+
+  // For plan messages (legacy type:'plan' or new type:'text' with plan metadata),
+  // render the plan as conversational markdown instead of the short placeholder.
+  const hasPlan = !!message.metadata?.plan
+  const effectiveContent = hasPlan
+    ? formatPlanToMarkdown(message.metadata!.plan as Record<string, unknown>)
+    : message.content
+  const useRich = message.type === 'text' || message.type === 'plan' || hasPlan
+
+  // Build a display message with the effective content
+  const displayMessage = hasPlan ? { ...message, content: effectiveContent } : message
 
   return (
     <div className="flex items-start gap-2.5 px-4 py-1.5">
@@ -250,7 +283,7 @@ function AssistantMessage({ message }: { message: Message }) {
               </span>
             </div>
           )}
-          <MessageContent message={message} rich={useRich} />
+          <MessageContent message={displayMessage} rich={useRich} />
         </div>
         <span className="text-2xs text-text-muted px-1">
           {formatRelativeTime(message.createdAt)}
