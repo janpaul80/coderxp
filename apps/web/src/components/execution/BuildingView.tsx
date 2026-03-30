@@ -475,10 +475,17 @@ export function BuildingView() {
       <div className="flex-1 min-h-0 flex flex-col">
         <AnimatePresence mode="wait">
           {streamingFile ? (
-            <React.Fragment key="split">
+            <motion.div
+              key="split"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.15 }}
+              className="flex-1 min-h-0 flex flex-col"
+            >
               <StreamingCodePanel />
               <TerminalPanel flex="0 1 40%" />
-            </React.Fragment>
+            </motion.div>
           ) : (
             <TerminalPanel key="full" flex="1 1 100%" />
           )}
