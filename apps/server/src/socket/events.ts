@@ -877,20 +877,11 @@ async function handleWithAI(
     return
   }
 
-  // ── Immediate ack for non-trivial messages ──────────────────
-  // Send a visible "thinking" message so the user never stares at silence.
-  // This message appears instantly while the AI classification runs.
-  const ackId = `ack-${chatId}-${Date.now()}`
-  const thinkingMsg = {
-    id: ackId,
-    chatId,
-    role: 'assistant' as const,
-    type: 'text' as const,
-    content: '🔍 Analyzing your request...',
-    createdAt: new Date().toISOString(),
-    isThinking: true,
-  }
-  socket.emit('chat:message', thinkingMsg)
+  // ── Immediate thinking indicator ────────────────────────────
+  // Instead of sending a chat message (which persists in the thread),
+  // trigger the typing indicator. This shows "Agent is thinking..." in
+  // the AssistantTyping bubble and disappears when the real response arrives.
+  socket.emit('chat:typing', { typing: true })
 
   const intent = await classifyIntent(content)
 
@@ -899,8 +890,6 @@ async function handleWithAI(
       // Shouldn't normally reach here (caught by fast path above),
       // but handle gracefully if AI classifier returns greeting
       const response = await generateGreeting()
-      // Replace thinking message with real response
-      socket.emit('chat:message', { ...thinkingMsg, id: ackId, content: response, isThinking: false })
       await persistAndEmitAssistantMessage(socket, chatId, response, 'text')
       return
     }

@@ -418,18 +418,37 @@ export async function validatePreviewContent(
       return { valid: false, reason: 'Empty response body' }
     }
 
-    // Vite error overlay — the page has <script> tags but the app div is empty
-    // A truly blank React app will have <div id="root"></div> with nothing inside it
-    // but the JS hasn't executed. We check for the Vite error pre tag.
+    // Vite error overlay or server error
     if (body.includes('vite-error-overlay') || body.includes('Internal Server Error')) {
       return { valid: false, reason: 'Vite error overlay detected' }
     }
 
-    // Very minimal body — less than 100 bytes of actual content suggests a bare-bones
-    // index.html with no compiled JS loaded (build broke before bundling)
-    const stripped = body.replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim()
-    if (stripped.length < 10 && !body.includes('<script')) {
-      return { valid: false, reason: 'No meaningful content (no scripts, minimal HTML)' }
+    // Vite module errors — these appear when a module can't be resolved
+    if (body.includes('Failed to resolve import') || body.includes('does not provide an export')) {
+      return { valid: false, reason: 'Vite module resolution error' }
+    }
+
+    // Check that the HTML has the essential Vite structure
+    const hasRoot = body.includes('id="root"')
+    const hasScript = body.includes('<script')
+    if (!hasRoot && !hasScript) {
+      return { valid: false, reason: 'No root element or script tags — not a Vite app' }
+    }
+
+    // Now do a second fetch to check if Vite can actually serve the main.tsx module.
+    // This catches cases where the HTML loads but the JS fails to compile.
+    try {
+      const mainTsxUrl = url.replace(/\/?$/, '/src/main.tsx')
+      const { status: jsStatus, body: jsBody } = await httpGetBody(mainTsxUrl, 15000)
+      if (jsStatus >= 400) {
+        return { valid: false, reason: `main.tsx returned HTTP ${jsStatus} — Vite can't compile the entry point` }
+      }
+      // Vite returns transformed JS. If it contains an error, it'll have a specific pattern.
+      if (jsBody.includes('500 Internal Server Error') || jsBody.includes('ENOENT') || jsBody.includes('SyntaxError')) {
+        return { valid: false, reason: 'main.tsx compilation error detected' }
+      }
+    } catch {
+      // Non-fatal: if we can't fetch main.tsx, the HTML check already passed
     }
 
     log(`Content validation passed: HTTP ${status}, body ${body.length} bytes`)

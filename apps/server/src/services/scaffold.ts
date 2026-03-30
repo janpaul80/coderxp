@@ -370,14 +370,14 @@ function genAppTsx(input: ScaffoldInput): string {
   }
 
   return `import React from 'react'
-import { BrowserRouter, Routes, Route } from 'react-router-dom'
+import { HashRouter, Routes, Route } from 'react-router-dom'
 import { Header } from './components/Header'
 ${imports.join('\n')}
 import './index.css'
 
 function App() {
   return (
-    <BrowserRouter>
+    <HashRouter>
       <div className="min-h-screen bg-gray-50">
         <Header />
         <main>
@@ -386,7 +386,7 @@ ${routes.join('\n')}
           </Routes>
         </main>
       </div>
-    </BrowserRouter>
+    </HashRouter>
   )
 }
 

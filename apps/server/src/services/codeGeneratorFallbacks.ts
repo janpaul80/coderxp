@@ -30,7 +30,7 @@ export function fallbackAppTsx(
 
   const imports: string[] = [
     "import React from 'react'",
-    "import { BrowserRouter, Routes, Route } from 'react-router-dom'",
+    "import { HashRouter, Routes, Route } from 'react-router-dom'",
     // Header is always included — fallback builds previously had no navigation
     "import Header from './components/Header'",
     "import HomePage from './pages/Home'",
@@ -56,13 +56,13 @@ export function fallbackAppTsx(
     '',
     'export default function App() {',
     '  return (',
-    '    <BrowserRouter>',
+    '    <HashRouter>',
     '      <Header />',
     '      <Routes>',
     ...routes,
     "        <Route path='*' element={<HomePage />} />",
     '      </Routes>',
-    '    </BrowserRouter>',
+    '    </HashRouter>',
     '  )',
     '}',
   ]

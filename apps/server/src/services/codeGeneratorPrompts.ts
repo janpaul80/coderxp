@@ -258,7 +258,7 @@ export function promptAppTsx(
 Generate src/App.tsx for "${project.projectName}".
 
 REQUIRED PAGE IMPORTS (copy exactly — do not omit any):
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { HashRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { Header } from './components/Header'
 ${pageImports.join('\n')}
 
@@ -278,7 +278,9 @@ ${routes.map(r => {
 Other requirements:
 - Outer wrapper: <div className="min-h-screen bg-zinc-950 text-zinc-50">
 - <Header /> rendered above <Routes> on every page
-- BrowserRouter wraps everything
+- CRITICAL: Use HashRouter (NOT BrowserRouter). The preview is served at a subpath
+  (/api/preview/{id}/app/) so BrowserRouter's path-based routing fails. HashRouter
+  uses #/ for routes which works at any base URL.
 
 ${design}
 
