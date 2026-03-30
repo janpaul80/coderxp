@@ -118,7 +118,7 @@ let _forceTemplateFallback = false
 
 // Track consecutive AI failures so the generation loop can fast-fail
 let _consecutiveAiFailures = 0
-const MAX_CONSECUTIVE_FAILURES = 1  // After 1 timeout, skip all remaining AI calls
+const MAX_CONSECUTIVE_FAILURES = 3  // After 3 consecutive timeouts, skip remaining AI calls
 
 async function generateFileWithAI(
   userPrompt: string,

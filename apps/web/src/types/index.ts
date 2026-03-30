@@ -378,6 +378,7 @@ export interface ServerToClientEvents {
   'job:created': (job: Job) => void
   'job:updated': (job: Job) => void
   'job:log': (data: { jobId: string; log?: JobLog; msg?: string }) => void
+  'build:log': (data: { message: string; type?: string }) => void
   'job:complete': (data: {
     jobId: string
     previewUrl?: string

@@ -1004,9 +1004,14 @@ async function handleWithAI(
 
   if (intent === 'build_request' || intent === 'modification') {
     try {
+      // Emit early terminal output so the user sees activity immediately
+      socket.emit('build:log', { message: 'Understanding your request...', type: 'info' })
+
       // Emit planner agent status
       emitPipelineStatus('planning', 'Agent is thinking...')
       emitAgentStatus('planner', 'running', 'Planner: analyzing request...')
+
+      socket.emit('build:log', { message: 'Planning architecture and file structure...', type: 'run' })
 
       const { plan: planOutput, metadata } = await generatePlan({
         userRequest: content,
@@ -1015,6 +1020,7 @@ async function handleWithAI(
       })
 
       emitAgentStatus('planner', 'complete', `Planner: plan generated (${metadata.durationMs}ms)`)
+      socket.emit('build:log', { message: `Plan ready — ${planOutput.features?.length ?? 0} features identified. Starting build...`, type: 'success' })
 
       const plan = await prisma.plan.create({
         data: {

@@ -106,15 +106,6 @@ export function useSocket() {
     // ── Typing indicator ──────────────────────────────────
     s.on('chat:typing', ({ typing }: { typing: boolean }) => {
       setAssistantTyping(typing)
-      // When the agent starts working, transition the right panel to show
-      // the planning/terminal view instead of the idle logo screen.
-      // This gives immediate feedback that something is happening.
-      if (typing) {
-        const currentMode = useAppStore.getState().appMode
-        if (currentMode === 'idle') {
-          useAppStore.getState().transitionToPlanning()
-        }
-      }
     })
 
     // ── Plan events ───────────────────────────────────────
@@ -122,8 +113,7 @@ export function useSocket() {
     // Store the plan but don't block the UI — the build will start via job:created.
     s.on('plan:created', (plan: Plan) => {
       useAppStore.getState().setActivePlan(plan)
-      // Show planning view only briefly — job:created will override immediately
-      useAppStore.getState().transitionToPlanning()
+      // Stay in building view — job:created will update the jobId momentarily
     })
 
     s.on('plan:updated', (plan: Plan) => {
@@ -145,6 +135,22 @@ export function useSocket() {
         progress: job.progress,
         recentLogs: job.logs?.slice(-10) ?? [],
         failureCategory: job.failureCategory,
+      })
+    })
+
+    // ── Pre-build terminal output (no jobId required) ───
+    // Also transitions to building view on first log — so the user sees the
+    // terminal immediately when the backend confirms it's a build request.
+    s.on('build:log', ({ message, type }: { message: string; type?: string }) => {
+      const currentMode = useAppStore.getState().appMode
+      if (currentMode === 'idle' || currentMode === 'planning') {
+        useAppStore.getState().transitionToBuilding('pending')
+      }
+      pushTerminalLog({
+        id: `pre-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        timestamp: new Date().toISOString(),
+        type: type ?? 'info',
+        message,
       })
     })
 

@@ -246,7 +246,7 @@ function AssistantMessage({ message }: { message: Message }) {
   // render the plan as conversational markdown instead of the short placeholder.
   const hasPlan = !!message.metadata?.plan
   const effectiveContent = hasPlan
-    ? formatPlanToMarkdown(message.metadata!.plan as Record<string, unknown>)
+    ? formatPlanToMarkdown(message.metadata!.plan as unknown as Record<string, unknown>)
     : message.content
   const useRich = message.type === 'text' || message.type === 'plan' || hasPlan
 

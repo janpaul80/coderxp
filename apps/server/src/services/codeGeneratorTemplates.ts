@@ -46,7 +46,10 @@ export function templateViteConfig(): string {
 }
 
 export function templateIndexHtml(project: CodeGenProject): string {
-  return `<!DOCTYPE html>\n<html lang="en" class="dark">\n  <head>\n    <meta charset="UTF-8" />\n    <meta name="viewport" content="width=device-width, initial-scale=1.0" />\n    <meta name="description" content="${project.summary}" />\n    <title>${project.projectName}</title>\n    <link rel="preconnect" href="https://fonts.googleapis.com" />\n    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />\n    <style>html,body{background-color:#09090b;margin:0}</style>\n  </head>\n  <body>\n    <div id="root"></div>\n    <script type="module" src="/src/main.tsx"></script>\n  </body>\n</html>\n`
+  // Sanitize values for safe HTML attribute embedding — escape quotes and angle brackets
+  const safeSummary = (project.summary ?? '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;').slice(0, 160)
+  const safeName = (project.projectName ?? 'App').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;').slice(0, 60)
+  return `<!DOCTYPE html>\n<html lang="en" class="dark">\n  <head>\n    <meta charset="UTF-8" />\n    <meta name="viewport" content="width=device-width, initial-scale=1.0" />\n    <meta name="description" content="${safeSummary}" />\n    <title>${safeName}</title>\n    <link rel="preconnect" href="https://fonts.googleapis.com" />\n    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />\n    <style>html,body{background-color:#09090b;margin:0}</style>\n  </head>\n  <body>\n    <div id="root"></div>\n    <script type="module" src="/src/main.tsx"></script>\n  </body>\n</html>\n`
 }
 
 export function templateMainTsx(): string {
