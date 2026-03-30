@@ -25,16 +25,15 @@ import './env'
 import express, { Request, Response } from 'express'
 import { createServer } from 'http'
 import { Worker, Job, ConnectionOptions } from 'bullmq'
-import { JobStatus, Prisma } from '@prisma/client'
+type JobStatus = string // Matches prisma JobStatus enum values
 import { prisma } from './lib/prisma'
 import {
   createWorkspace,
-  writeWorkspaceFile,
   getWorkspaceFileTree,
   getWorkspaceTotalBytes,
-  validateWorkspaceFiles,
 } from './services/workspace'
-import { generateScaffold, type ScaffoldInput } from './services/scaffold'
+import { generateProjectFiles } from './services/codeGenerator'
+import type { CodeGenProject, CodeGenCallbacks } from './services/codeGeneratorTypes'
 import {
   startPreview,
   type PreviewLogEntry,
@@ -184,7 +183,7 @@ const worker = new Worker(
       },
       onCommandSummary: async (summary) => {
         const safe = sanitizeCommandSummary(summary as CommandSummary)
-        await setJobStep(jobId, { commandSummary: safe as unknown as Prisma.InputJsonValue })
+        await setJobStep(jobId, { commandSummary: safe as any })
       },
       onFailure: async ({ phase, error, commandSummary }) => {
         const category = classifyFailure(error, phase)
@@ -194,7 +193,7 @@ const worker = new Worker(
           currentStep: 'Build failed',
           previewStatus: 'failed',
           failureCategory: category,
-          commandSummary: safeSummary ? (safeSummary as unknown as Prisma.InputJsonValue) : null,
+          commandSummary: safeSummary ? (safeSummary as any) : null,
           retryCount,
         })
         const logStep: BuildLogStep =
@@ -237,67 +236,99 @@ const worker = new Worker(
       const backendScope = Array.isArray(plan.backendScope) ? plan.backendScope as string[] : []
       const integrations = Array.isArray(plan.integrations) ? plan.integrations as string[] : []
 
-      const scaffoldInput: ScaffoldInput = {
+      // ── Build the CodeGenProject from the plan ──────────────
+      const codeGenProject: CodeGenProject = {
         projectName: project.name,
-        summary: typeof plan.summary === 'string' ? plan.summary : 'A CodedXP generated application',
-        features, techStack, frontendScope, backendScope, integrations,
+        summary: typeof plan.summary === 'string' ? plan.summary : 'A CoderXP generated application',
+        features,
+        techStack: techStack as Record<string, string[]>,
+        frontendScope,
+        backendScope,
+        integrations,
       }
 
-      currentPhase = 'scaffold'
-      await addLog('info', 'Generating scaffold', 'scaffold_generate', { templateVersion: '3.x' })
-      const scaffold = generateScaffold(scaffoldInput)
+      // ── Set up streaming callbacks ──────────────────────────
+      // These wire generateProjectFiles() output directly to the frontend
+      // via socket events, so users see real code being written live.
+      let filesGenerated = 0
+      let totalFileCount = 0
 
-      currentPhase = 'files_write'
-      const writeBatch = async (paths: string[]) => {
-        for (const f of scaffold.files.filter(sf => paths.includes(sf.relativePath))) {
-          const written = writeWorkspaceFile(workspacePath, f.relativePath, f.content)
-          await addLog('create', `CREATE ${f.relativePath} (${(written.bytes / 1024).toFixed(1)} KB)`, 'files_write', { relativePath: f.relativePath, bytes: written.bytes }, f.relativePath, written.bytes)
-        }
+      const codeGenCallbacks: CodeGenCallbacks = {
+        onPhaseStart: async (phase: string, fileCount: number) => {
+          totalFileCount += fileCount
+          const phaseLabel = phase === 'templates' ? 'Configuration files' : 'AI-generated code'
+          await addLog('info', `── ${phaseLabel} (${fileCount} files) ──`, 'scaffold_generate', { phase, fileCount })
+          if (phase === 'templates') {
+            await setStep('initializing', 'Generating configuration files...', 10)
+          } else {
+            await setStep('generating_frontend', 'Writing application code...', 30)
+          }
+        },
+
+        onFileStart: async (path: string, description: string) => {
+          currentPhase = 'files_write'
+          await addLog('info', `GENERATING ${path}`, 'files_write', { relativePath: path, description })
+          // Emit streaming file start — frontend will show the file path in StreamingCodePanel
+          void emitToUser(userId, 'job:file_token', { jobId, path, delta: '' })
+        },
+
+        onFileComplete: async (path: string, bytes: number, generatedBy: 'ai' | 'template') => {
+          filesGenerated++
+          const progress = Math.min(85, 10 + Math.round((filesGenerated / Math.max(totalFileCount, 1)) * 75))
+          await addLog('create', `CREATE ${path} (${(bytes / 1024).toFixed(1)} KB) [${generatedBy}]`, 'files_write', {
+            relativePath: path, bytes, generatedBy,
+          }, path, bytes, generatedBy)
+          await setStep(
+            filesGenerated <= totalFileCount * 0.5 ? 'generating_frontend' : 'generating_backend',
+            `Writing ${path}...`,
+            progress,
+          )
+        },
+
+        onFileError: async (path: string, error: string) => {
+          await addLog('error', `FAILED ${path}: ${error}`, 'files_write', { relativePath: path, error })
+        },
+
+        // ── Live token streaming ──────────────────────────────
+        // Each delta from the AI is emitted to the frontend in real time.
+        // The frontend's StreamingCodePanel shows code appearing character
+        // by character with a blinking cursor — the "ghostwriter" effect.
+        onFileToken: async (path: string, delta: string) => {
+          void emitToUser(userId, 'job:file_token', { jobId, path, delta })
+        },
+
+        onValidationError: async (error) => {
+          await addLog('error', `VALIDATION: ${error.message} (${error.filePath ?? 'unknown'})`, 'code_quality', {
+            errorType: error.type,
+            filePath: error.filePath,
+          })
+        },
       }
 
-      const step1Files = ['package.json', 'README.md', '.gitignore', 'tsconfig.json', 'tsconfig.node.json']
-      await writeBatch(step1Files)
-      await setStep('installing', 'Writing build configuration', 15)
+      // ── Phase: AI Code Generation ───────────────────────────
+      currentPhase = 'codegen'
+      await addLog('info', 'Starting AI code generation...', 'scaffold_generate', {
+        projectName: project.name,
+        featureCount: features.length,
+        hasBackend: backendScope.length > 0,
+      })
 
-      const step2Files = ['vite.config.ts', 'tailwind.config.js', 'postcss.config.js', 'index.html', '.env.example']
-      await writeBatch(step2Files)
-      await setStep('generating_frontend', 'Generating frontend code', 35)
+      const generated = await generateProjectFiles(workspacePath, codeGenProject, codeGenCallbacks)
 
-      const frontendPaths = ['src/main.tsx', 'src/App.tsx', 'src/index.css', 'src/lib/api.ts', 'src/components/Header.tsx', 'src/components/Dashboard.tsx', 'src/pages/Home.tsx', 'src/pages/Login.tsx', 'src/pages/Register.tsx']
-      await writeBatch(frontendPaths)
-      await setStep('generating_backend', 'Generating backend code', 55)
-
-      const backendPaths = ['server/index.ts', 'server/routes/api.ts']
-      await writeBatch(backendPaths)
-      await setStep('wiring_auth', 'Wiring authentication', 65)
-
-      const authPaths = ['server/routes/auth.ts', 'server/middleware/auth.ts']
-      await writeBatch(authPaths)
-      await setStep('wiring_integrations', 'Wiring integrations', 75)
-
-      const integrationPaths = ['prisma/schema.prisma']
-      await writeBatch(integrationPaths)
-      await setStep('running', 'Finalizing workspace', 85)
-
-      const writtenPaths = new Set([...step1Files, ...step2Files, ...frontendPaths, ...backendPaths, ...authPaths, ...integrationPaths])
-      for (const f of scaffold.files.filter(sf => !writtenPaths.has(sf.relativePath))) {
-        const written = writeWorkspaceFile(workspacePath, f.relativePath, f.content)
-        await addLog('create', `CREATE ${f.relativePath} (${(written.bytes / 1024).toFixed(1)} KB)`, 'files_write', { relativePath: f.relativePath, bytes: written.bytes }, f.relativePath, written.bytes)
-      }
-
+      // ── Phase: Validate ─────────────────────────────────────
       currentPhase = 'scaffold_validate'
-      await setStep('testing', 'Validating workspace', 90)
+      await setStep('testing', 'Validating workspace', 87)
       const fileTree = getWorkspaceFileTree(workspacePath)
       const totalBytes = getWorkspaceTotalBytes(workspacePath)
-      const expectedFiles = scaffold.files.map(f => f.relativePath)
-      const missingFiles = validateWorkspaceFiles(workspacePath, expectedFiles)
+      const aiFileCount = generated.filter(f => f.generatedBy === 'ai').length
+      const templateFileCount = generated.filter(f => f.generatedBy === 'template').length
 
-      await addLog('validate', `VALIDATE ${fileTree.length} files, ${(totalBytes / 1024).toFixed(1)} KB total`, 'scaffold_validate', { expected: expectedFiles.length, actual: fileTree.length })
-
-      if (missingFiles.length > 0) {
-        await addLog('error', `MISSING ${missingFiles.length} files`, 'scaffold_validate', { missingFiles })
-        throw new Error(`Workspace validation failed: ${missingFiles.length} missing files`)
-      }
+      await addLog('validate', `VALIDATE ${fileTree.length} files, ${(totalBytes / 1024).toFixed(1)} KB total (${aiFileCount} AI, ${templateFileCount} template)`, 'scaffold_validate', {
+        expected: generated.length,
+        actual: fileTree.length,
+        aiFiles: aiFileCount,
+        templateFiles: templateFileCount,
+      })
 
       const generatedKeyFiles = fileTree.filter(p => ['package.json', 'vite.config.ts', 'src/main.tsx', 'src/App.tsx', 'server/index.ts'].includes(p))
 
@@ -305,13 +336,13 @@ const worker = new Worker(
         workspacePath,
         generatedFileCount: fileTree.length,
         generatedTotalBytes: totalBytes,
-        generatedKeyFiles: generatedKeyFiles as Prisma.InputJsonValue,
-        scaffoldValidation: { expectedCount: expectedFiles.length, actualCount: fileTree.length, missingCount: 0 } as Prisma.InputJsonValue,
+        generatedKeyFiles: generatedKeyFiles as any,
+        scaffoldValidation: { expectedCount: generated.length, actualCount: fileTree.length, missingCount: 0, aiFiles: aiFileCount, templateFiles: templateFileCount } as any,
       })
 
+      // Persist file records in DB
       await Promise.all(
-        scaffold.files.map(async (f) => {
-          const bytes = Buffer.byteLength(f.content, 'utf-8')
+        generated.map(async (f) => {
           return prisma.file.create({
             data: {
               projectId,
@@ -322,7 +353,7 @@ const worker = new Worker(
                 : f.relativePath.endsWith('.html') ? 'text/html'
                 : f.relativePath.endsWith('.css') ? 'text/css'
                 : 'text/typescript',
-              size: bytes,
+              size: f.bytes,
               path: `${workspacePath}/${f.relativePath}`,
               url: null,
             },
@@ -331,6 +362,7 @@ const worker = new Worker(
       )
 
       await setJobStep(jobId, { workspacePath, fileCount: fileTree.length, totalBytes })
+
 
       currentPhase = 'install'
       await addLog('info', `INSTALL starting npm install in ${workspacePath}`, 'install_deps', { workspacePath })
@@ -361,10 +393,10 @@ const worker = new Worker(
         buildMeta: {
           installDurationMs: previewInstance.installDurationMs ?? null,
           startDurationMs: previewInstance.startDurationMs ?? null,
-        } as Prisma.InputJsonValue,
+        } as any,
       })
 
-      await prisma.job.update({ where: { id: jobId }, data: { logs: allLogs as unknown as Prisma.InputJsonValue } })
+      await prisma.job.update({ where: { id: jobId }, data: { logs: allLogs as any } })
       await prisma.project.update({ where: { id: projectId }, data: { status: 'ready' } })
 
       void emitToUser(userId, 'job:complete', { jobId, previewUrl: publicPreviewUrl, previewPort: previewInstance.port, previewPid: previewInstance.pid })
@@ -384,7 +416,7 @@ const worker = new Worker(
         completedAt: new Date(),
         retryCount,
       })
-      await prisma.job.update({ where: { id: jobId }, data: { logs: allLogs as unknown as Prisma.InputJsonValue } })
+      await prisma.job.update({ where: { id: jobId }, data: { logs: allLogs as any } })
       await prisma.project.update({ where: { id: projectId }, data: { status: 'error' } })
       void emitToUser(userId, 'job:failed', { jobId, error: { code: 'BUILD_FAILED', message, category, retryCount } })
 
