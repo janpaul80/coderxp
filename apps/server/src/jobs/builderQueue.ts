@@ -1305,20 +1305,21 @@ try {
 
               // Generate refactor plans for detected smells
               const repoCtx = codeGenProject.repoContext ?? ''
-              const refactorPlans = await generateRefactorPlans(smellReport, repoCtx).catch(() => [])
+              const refactorPlansRes = await generateRefactorPlans(smellReport, repoCtx).catch(() => ({ plans: [] }))
+              const refactorPlans = refactorPlansRes && 'plans' in refactorPlansRes ? refactorPlansRes.plans : []
               if (refactorPlans.length > 0) {
                 await addLog('info', `REFACTOR PLANS: ${refactorPlans.length} improvement plans generated`, 'code_quality', {
                   planCount: refactorPlans.length,
-                  highRisk: refactorPlans.filter(p => p.risk === 'high').length,
+                  highRisk: refactorPlans.filter(p => p.riskLevel === 'high' || p.riskLevel === 'critical').length,
                 })
               }
 
               // Analyze outdated dependencies
               const depReport = analyzeOutdatedDeps(workspacePath)
-              if (depReport.outdated.length > 0) {
-                await addLog('info', `DEPENDENCIES: ${depReport.outdated.length} outdated (${depReport.critical.length} critical)`, 'code_quality', {
-                  outdated: depReport.outdated.length,
-                  critical: depReport.critical.length,
+              if (depReport.totalOutdated > 0) {
+                await addLog('info', `DEPENDENCIES: ${depReport.totalOutdated} outdated (${depReport.majorUpgrades} major upgrades)`, 'code_quality', {
+                  outdated: depReport.totalOutdated,
+                  critical: depReport.majorUpgrades,
                 })
               }
 
@@ -1328,7 +1329,7 @@ try {
               if (migrations.length > 0) {
                 await addLog('info', `MIGRATIONS: ${migrations.length} applicable migration paths detected`, 'code_quality', {
                   migrationCount: migrations.length,
-                  migrations: migrations.map(m => m.id),
+                  migrations: migrations,
                 })
               }
 
@@ -1342,25 +1343,25 @@ try {
               // Emit refactor results to frontend
               emitToUser(userId, 'job:refactor_analysis', {
                 jobId,
-                smells: smellReport.map(s => ({
-                  type: s.type,
-                  count: s.instances.length,
+                smells: smellReport.smells.map(s => ({
+                  type: s.category,
+                  count: 1,
                   severity: s.severity,
                 })),
                 plans: refactorPlans.slice(0, 5).map(p => ({
                   id: p.id,
                   title: p.title,
-                  risk: p.risk,
+                  risk: p.riskLevel,
                   affectedFiles: p.affectedFiles.length,
                 })),
                 dependencies: {
-                  outdated: depReport.outdated.length,
-                  critical: depReport.critical.length,
+                  outdated: depReport.totalOutdated,
+                  critical: depReport.majorUpgrades,
                 },
-                migrations: migrations.map(m => ({ id: m.id, name: m.name })),
+                migrations: migrations.map(m => ({ id: m, name: m })),
               })
 
-              console.log(`[RefactorAgent] Analysis complete: ${totalSmells} smells, ${refactorPlans.length} plans, ${depReport.outdated.length} outdated deps, ${migrations.length} migrations`)
+              console.log(`[RefactorAgent] Analysis complete: ${totalSmells} smells, ${refactorPlans.length} plans, ${depReport.totalOutdated} outdated deps, ${migrations.length} migrations`)
             } else {
               await addLog('success', 'REFACTOR ANALYSIS: code is clean — no smells detected', 'code_quality', {})
             }
