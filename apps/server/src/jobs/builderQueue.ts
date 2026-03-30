@@ -445,7 +445,7 @@ try {
           status: JobStatus,
           currentStep: string,
           progress: number,
-          patch?: Partial<Parameters<typeof setJobStep>[1]>
+          patch?: any
         ) => {
           await setJobStep(jobId, {
             status,
@@ -823,7 +823,7 @@ try {
             onFileStart: async (filePath, description) => {
               await addLog('create', `GENERATING ${filePath} — ${description}`, 'files_write', {}, filePath)
             },
-            onFileComplete: async (filePath, bytes, generatedBy) => {
+            onFileComplete: async (filePath, bytes, generatedBy, content) => {
               generatedFiles.push({
                 relativePath: filePath,
                 content: '', // Will be read from disk if needed
@@ -971,7 +971,7 @@ try {
                 onFileStart: async (fp, description) => {
                   await addLog('create', `INTEGRATION REPAIR ${fp} — ${description}`, 'scaffold_validate', {}, fp)
                 },
-                onFileComplete: async (fp, bytes, generatedBy) => {
+                onFileComplete: async (fp, bytes, generatedBy, content) => {
                   await addLog('create',
                     `INTEGRATION REPAIRED ${fp} (${(bytes / 1024).toFixed(1)} KB) [${generatedBy}]`,
                     'scaffold_validate',
@@ -1165,7 +1165,7 @@ try {
               onFileStart: async (filePath, description) => {
                 await addLog('create', `QUALITY REPAIR ${filePath}`, 'code_quality', {}, filePath)
               },
-              onFileComplete: async (filePath, bytes, generatedBy) => {
+              onFileComplete: async (filePath, bytes, generatedBy, content) => {
                 await addLog('create', `QUALITY REPAIRED ${filePath}`, 'code_quality', { bytes }, filePath, bytes)
                 emitBuildFileChange(filePath, 'qa', 'modified')
               },
@@ -1533,7 +1533,7 @@ try {
                 onFileStart: async (filePath, description) => {
                   await addLog('create', `PREVIEW REPAIR ${filePath} — ${description}`, 'preview_start', {}, filePath)
                 },
-                onFileComplete: async (filePath, bytes, generatedBy) => {
+                onFileComplete: async (filePath, bytes, generatedBy, content) => {
                   await addLog(
                     'create',
                     `PREVIEW REPAIRED ${filePath} (${(bytes / 1024).toFixed(1)} KB) [${generatedBy}]`,
@@ -1641,7 +1641,7 @@ try {
                   onFileStart: async (filePath, description) => {
                     await addLog('create', `SELF-HEAL: repairing ${filePath} — ${description}`, 'complete', {}, filePath)
                   },
-                  onFileComplete: async (filePath, bytes, generatedBy) => {
+                  onFileComplete: async (filePath, bytes, generatedBy, content) => {
                     await addLog('success', `SELF-HEAL: repaired ${filePath} (${(bytes / 1024).toFixed(1)} KB) [${generatedBy}]`, 'complete', { bytes, generatedBy }, filePath, bytes, generatedBy)
                   },
                   onFileError: async (filePath, error) => {

@@ -160,9 +160,15 @@ const worker = new Worker(
       status: JobStatus,
       currentStep: string,
       progress: number,
-      patch?: Partial<Parameters<typeof setJobStep>[1]>
+      patch?: any
     ) => {
-      await setJobStep(jobId, { status, currentStep, progress, retryCount, ...(patch ?? {}) })
+      await (setJobStep as any)(jobId, {
+        status,
+        currentStep,
+        progress,
+        retryCount,
+        ...(patch ?? {}),
+      })
       emitProgress(userId, jobId, status, currentStep, progress, allLogs)
     }
 
