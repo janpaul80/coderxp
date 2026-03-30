@@ -46,9 +46,12 @@ export function ErrorView() {
   const handleRetry = () => {
     const planId = activeJob?.planId
     const projectId = activeJob?.projectId
-    if (planId && projectId) {
-      getSocket().emit('plan:approve', { planId, projectId })
+    if (!planId || !projectId) return
+    if (!getSocket().connected) {
+      console.error('[ErrorView] Cannot retry: not connected to backend')
+      return
     }
+    getSocket().emit('plan:approve', { planId, projectId })
   }
 
   const handleAutoRepair = () => {

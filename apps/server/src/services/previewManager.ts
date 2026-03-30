@@ -145,18 +145,19 @@ function makePreviewLog(
 const INSTALL_TIMEOUT_MS = 6 * 60 * 1000
 const INSTALL_RETRY_TIMEOUT_MS = 4 * 60 * 1000
 
-// Detect available package manager — pnpm is ~10x faster and uses a global
-// content-addressed store, so repeated installs download zero bytes.
-function detectPackageManager(): 'pnpm' | 'npm' {
-  try {
-    execSync('pnpm --version', { stdio: 'ignore', timeout: 5000 })
-    return 'pnpm'
-  } catch {
-    return 'npm'
-  }
-}
-
-export const PKG_MANAGER = detectPackageManager()
+// Force npm for workspace installs.
+//
+// Generated workspaces live under /opt/coderxp-live/apps/server/workspaces/{id}/
+// which is inside the CoderXP pnpm monorepo. pnpm walks up directory trees and
+// finds the root pnpm-lock.yaml, which has entries (e.g. fsevents@2.3.3) that
+// don't exist in the workspace's package.json. This causes:
+//   ERR_PNPM_LOCKFILE_MISSING_DEPENDENCY: Broken lockfile
+// and exit code 1 on every install attempt.
+//
+// Neither pnpm-workspace.yaml, .npmrc shared-workspace-lockfile=false, nor
+// --no-frozen-lockfile prevent this. The only reliable fix is to use npm,
+// which doesn't have this parent-lockfile-walking behavior.
+export const PKG_MANAGER: 'pnpm' | 'npm' = 'npm'
 
 /**
  * Safely remove node_modules — Windows can throw EPERM/EBUSY on first try
@@ -206,7 +207,7 @@ export function runNpmInstall(
       const npmrcPath = path.join(workspacePath, '.npmrc')
       fs.writeFileSync(
         npmrcPath,
-        `node-linker=hoisted\nshamefully-hoist=true\nprefer-offline=true\n${storeDirective}`
+        `node-linker=hoisted\nshamefully-hoist=true\nprefer-offline=true\nshared-workspace-lockfile=false\n${storeDirective}`
       )
       // Isolate workspace from parent monorepo — pnpm traverses up and finds
       // the root pnpm-workspace.yaml, causing "Scope: all N workspace projects"
@@ -252,6 +253,15 @@ export function runNpmInstall(
 
     const flagStr = flags.slice(1).join(' ')
 
+    // Always remove stale lockfiles before install — pnpm traverses up from the
+    // workspace dir and can find the parent monorepo's pnpm-lock.yaml, which has
+    // entries for packages that don't exist in this workspace's package.json.
+    // This causes ERR_PNPM_LOCKFILE_MISSING_DEPENDENCY and exit code 1.
+    for (const lockfile of ['pnpm-lock.yaml', 'package-lock.json']) {
+      const lockPath = path.join(workspacePath, lockfile)
+      try { if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath) } catch {}
+    }
+
     onLog(makePreviewLog(jobId, 'info', `RUN ${cmd} ${flagStr} (cwd: ${workspacePath})`))
     onLog(makePreviewLog(jobId, 'info', `TIMEOUT ${timeoutMs / 60000} minutes (${cmd}, retry=${options?.isRetry ?? false}, ignoreScripts=${options?.ignoreScripts ?? false})`))
     callbacks?.onPhase?.('installing', { cwd: workspacePath, legacyPeerDeps: options?.legacyPeerDeps ?? false })
@@ -262,7 +272,7 @@ export function runNpmInstall(
       env: installEnv,
     })
 
-    let lastStderr = ''
+    let stderrTail = ''
     let stdoutTail = ''
     let timedOut = false
 
@@ -275,11 +285,11 @@ export function runNpmInstall(
       }
     })
 
-    // Stream stderr
+    // Stream stderr — accumulate last 1000 chars for diagnostics
     child.stderr?.on('data', (data: Buffer) => {
       const lines = data.toString().split('\n').filter(l => l.trim())
       for (const line of lines) {
-        lastStderr = line
+        stderrTail = `${stderrTail}\n${line}`.slice(-1000)
         // npm writes progress/warnings to stderr — treat as info unless it looks like an error
         const isError = line.toLowerCase().includes('error') || line.toLowerCase().includes('err!')
         onLog(makePreviewLog(jobId, isError ? 'error' : 'run', line, 'stderr'))
@@ -312,7 +322,7 @@ export function runNpmInstall(
         durationMs,
         timedOut: false,
         stdoutTail,
-        stderrTail: lastStderr,
+        stderrTail,
       }
       callbacks?.onCommandSummary?.(summary)
 
@@ -320,7 +330,7 @@ export function runNpmInstall(
         onLog(makePreviewLog(jobId, 'success', `DEPS ${cmd} install completed in ${durationSec}s`))
         resolve()
       } else {
-        const msg = `${cmd} install failed with exit code ${code}. Last stderr: ${lastStderr}`
+        const msg = `${cmd} install failed with exit code ${code}. stderr: ${stderrTail.trim().slice(-500)}`
         onLog(makePreviewLog(jobId, 'error', `DEPS FAILED: ${msg}`))
         callbacks?.onFailure?.({ phase: 'installing', error: new Error(msg), commandSummary: summary })
         reject(new Error(msg))

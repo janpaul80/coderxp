@@ -210,11 +210,11 @@ export function LeftPanel() {
       {/* ── Header ──────────────────────────────────────────── */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-white/[0.06] shrink-0">
         <div className="flex items-center gap-2">
-          {/* Real CoderXP logo */}
+          {/* Real CoderXP logo — increased size */}
           <img
             src="/logo-white.png"
             alt="CoderXP"
-            className="h-12 md:h-14 w-auto select-none"
+            className="h-20 w-auto select-none"
             draggable={false}
           />
         </div>
@@ -277,23 +277,27 @@ export function LeftPanel() {
       {/* ── Status footer ───────────────────────────────────── */}
       <div className="shrink-0 px-4 py-2 border-t border-white/[0.04] bg-transparent">
         <div className="flex items-center justify-between">
-          <span className="text-xs text-white/50 tracking-wider">CoderXP</span>
+          <span className="text-xs text-white/50 tracking-wider w-20">CoderXP</span>
           
-          <span className="text-xs text-white/40 hidden xl:inline font-medium">
-            Upgrade to Team for more credits.<span className="mx-1.5 opacity-40">•</span>
-            <a href="https://coderxp.pro/pricing" target="_blank" rel="noreferrer" className="text-emerald-400 hover:text-emerald-300">
-              Upgrade Plan
-            </a>
-          </span>
+          <div className="flex-1 flex justify-center">
+            <span className="text-xs text-white/40 hidden xl:inline font-medium">
+              Upgrade to Team for more credits.<span className="mx-1.5 opacity-40">•</span>
+              <a href="https://coderxp.pro/pricing" target="_blank" rel="noreferrer" className="text-emerald-400 hover:text-emerald-300">
+                Upgrade Plan
+              </a>
+            </span>
 
-          <span className="text-[10px] text-white/40 hidden md:inline xl:hidden">
-            Upgrade to Team for more c...
-            <a href="https://coderxp.pro/pricing" target="_blank" rel="noreferrer" className="text-emerald-400 hover:text-emerald-300 ml-1">
-              Upgrade Plan
-            </a>
-          </span>
+            <span className="text-[10px] text-white/40 hidden md:inline xl:hidden text-center">
+              Upgrade to Team for more c...
+              <a href="https://coderxp.pro/pricing" target="_blank" rel="noreferrer" className="text-emerald-400 hover:text-emerald-300 ml-1">
+                Upgrade Plan
+              </a>
+            </span>
+          </div>
 
-          <StatusIndicator mode={appMode} showLabel={true} className="shrink-0" />
+          <div className="w-20 flex justify-end">
+            <StatusIndicator mode={appMode} showLabel={true} className="shrink-0" />
+          </div>
         </div>
       </div>
 

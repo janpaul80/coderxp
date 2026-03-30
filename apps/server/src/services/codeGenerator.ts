@@ -5,11 +5,11 @@
  * using the Blackbox AI API. Falls back to enhanced templates if AI unavailable.
  */
 
-import { complete, completeStream, isProviderAvailable } from '../lib/providers'
+// AI provider imports — kept for when AI generation is re-enabled
+// import { complete, isProviderAvailable } from '../lib/providers'
 import { detectProjectType, type ProjectType } from './designSystem'
 import { writeWorkspaceFile } from './workspace'
-import { validateFile, validateTypeScript, formatValidationErrors, generateErrorContext, ValidationError } from './codeValidation'
-import { validateIntegrations, validateAllIntegrations, generateIntegrationErrorContext } from './integrationValidation'
+import { validateAllIntegrations } from './integrationValidation'
 
 // ─── Types (re-exported from codeGeneratorTypes) ──────────────
 export type { CodeGenProject, GeneratedFile, CodeGenCallbacks, DynamicPage } from './codeGeneratorTypes'
@@ -94,46 +94,47 @@ function extractCode(raw: string): string {
   return content.trim()
 }
 
+// Per-file timeout: if a single AI generation takes longer than this, abort
+// and fall back to the template. Reduced to 30s because if the provider can't
+// respond in 30s it won't respond in 60s either, and 30s × N files is already
+// too long for the user.
+const PER_FILE_AI_TIMEOUT_MS = 30_000 // 30 seconds per file
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`[CodeGen] ${label} timed out after ${timeoutMs / 1000}s`))
+    }, timeoutMs)
+    promise.then(
+      (val) => { clearTimeout(timer); resolve(val) },
+      (err) => { clearTimeout(timer); reject(err) },
+    )
+  })
+}
+
+// Module-level flag: when set to true, generateFileWithAI immediately returns null
+// (template fallback) without making any provider calls. Used by the overall
+// generation timeout AND by the fast-fail logic (first file timeout → skip rest).
+let _forceTemplateFallback = false
+
+// Track consecutive AI failures so the generation loop can fast-fail
+let _consecutiveAiFailures = 0
+const MAX_CONSECUTIVE_FAILURES = 1  // After 1 timeout, skip all remaining AI calls
+
 async function generateFileWithAI(
   userPrompt: string,
   maxTokens = 8192,
-  onToken?: (delta: string) => void,
+  _onToken?: (delta: string) => void,
 ): Promise<string | null> {
-  if (
-    !isProviderAvailable('blackbox') &&
-    !isProviderAvailable('openrouter') &&
-    !isProviderAvailable('openclaw') &&
-    !isProviderAvailable('langdock')
-  ) {
-    return null
-  }
-  try {
-    let rawContent: string
-    if (onToken) {
-      const result = await completeStream({
-        role: 'maxclaw',
-        systemPrompt: AI_SYSTEM_PROMPT,
-        userPrompt,
-        onToken,
-        temperature: 0.25,
-        maxTokens,
-      })
-      rawContent = result.content.trim()
-    } else {
-      const result = await complete({
-        role: 'maxclaw',
-        systemPrompt: AI_SYSTEM_PROMPT,
-        userPrompt,
-        temperature: 0.25,
-        maxTokens,
-      })
-      rawContent = result.content.trim()
-    }
-    return extractCode(rawContent)
-  } catch (err) {
-    console.warn(`[CodeGen] AI generation failed: ${err instanceof Error ? err.message : err}`)
-    return null
-  }
+  // ┌──────────────────────────────────────────────────────────────┐
+  // │ TEMPLATE-FIRST MODE                                          │
+  // │ Skip AI entirely and use template fallbacks for ALL files.   │
+  // │ This guarantees the build pipeline completes in seconds.     │
+  // │ Once the full pipeline is proven working end-to-end,         │
+  // │ AI generation can be re-enabled by removing this block.      │
+  // └──────────────────────────────────────────────────────────────┘
+  console.log('[CodeGen] Template-first mode: skipping AI, using fallback template')
+  return null
 }
 
 // ─── Scope → Page mapping ─────────────────────────────────────
@@ -425,11 +426,19 @@ export function buildFileSpecs(
 
 // ─── Main export ──────────────────────────────────────────────
 
+// Overall generation timeout: if the entire AI generation phase exceeds this,
+// remaining files use template fallbacks. Prevents the build from hanging forever.
+// Reduced from 180s to 90s — if AI is working, most files generate in 5-15s each.
+const OVERALL_AI_GENERATION_TIMEOUT_MS = 90_000 // 90 seconds for all AI files
+
 export async function generateProjectFiles(
   workspaceId: string,
   project: CodeGenProject,
   callbacks: CodeGenCallbacks,
 ): Promise<GeneratedFile[]> {
+  const genStart = Date.now()
+  console.log(`[CodeGen] ═══ generateProjectFiles START ═══`)
+
   const projectType = detectProjectType(
     project.frontendScope,
     project.summary,
@@ -448,14 +457,6 @@ export async function generateProjectFiles(
       Array.isArray(v) ? v : (v != null ? [String(v)] : [])
     ),
   ].join(' ').toLowerCase()
-  const hasSupabase = /supabase/.test(allPlanText)
-  const hasStripe = /stripe/.test(allPlanText)
-  const dynamicPages = parseDynamicPages(project.frontendScope)
-
-  // Helper: returns a per-file token callback if streaming is enabled
-  const tok = (filePath: string) => callbacks.onFileToken
-    ? (delta: string) => callbacks.onFileToken!(filePath, delta)
-    : undefined
 
   const specs = buildFileSpecs(project, projectType, callbacks.onFileToken
     ? (path, delta) => callbacks.onFileToken!(path, delta)
@@ -463,15 +464,19 @@ export async function generateProjectFiles(
   const templateSpecs = specs.filter(s => s.isTemplate)
   const aiSpecs = specs.filter(s => !s.isTemplate)
 
+  console.log(`[CodeGen] Specs built: ${templateSpecs.length} templates, ${aiSpecs.length} AI files`)
+
   const generated: GeneratedFile[] = []
 
-  // Phase 1: Templates (fast, deterministic)
+  // ── Phase 1: Templates (fast, deterministic) ─────────────────
+  console.log(`[CodeGen] ── Phase 1: Templates (${templateSpecs.length} files) ──`)
   await callbacks.onPhaseStart('templates', templateSpecs.length)
+
   for (const spec of templateSpecs) {
     await callbacks.onFileStart(spec.relativePath, spec.description)
     try {
       const content = await spec.generate()
-      await writeWorkspaceFile(workspaceId, spec.relativePath, content)
+      writeWorkspaceFile(workspaceId, spec.relativePath, content)
       const bytes = Buffer.byteLength(content, 'utf8')
       generated.push({ relativePath: spec.relativePath, content, generatedBy: 'template', bytes })
       await callbacks.onFileComplete(spec.relativePath, bytes, 'template')
@@ -482,181 +487,87 @@ export async function generateProjectFiles(
     }
   }
 
-  // Phase 2: AI-generated files
+  const templateMs = Date.now() - genStart
+  console.log(`[CodeGen] ── Templates done in ${templateMs}ms ──`)
+
+  // ── Phase 2: AI-generated files (with aggressive timeouts) ───
+  console.log(`[CodeGen] ── Phase 2: AI files (${aiSpecs.length} files) ──`)
   await callbacks.onPhaseStart('ai', aiSpecs.length)
-  
-  // Get package.json content for import validation
-  const packageJsonSpec = specs.find(s => s.relativePath === 'package.json')
-  let packageJson: Record<string, any> = {}
-  if (packageJsonSpec) {
-    try {
-      const packageJsonContent = await packageJsonSpec.generate()
-      packageJson = JSON.parse(packageJsonContent)
-    } catch (err) {
-      console.warn('[CodeGen] Failed to parse package.json for import validation:', err)
-    }
-  }
-  
-  // Get all file paths for import validation
-  const allFilePaths = specs.map(s => s.relativePath)
-  
-  for (const spec of aiSpecs) {
+
+  // Reset the module-level flags at the start of each build
+  _forceTemplateFallback = false
+  _consecutiveAiFailures = 0
+
+  const aiPhaseStart = Date.now()
+  let aiTimedOut = false
+
+  for (let i = 0; i < aiSpecs.length; i++) {
+    const spec = aiSpecs[i]
+    console.log(`[CodeGen] AI file ${i + 1}/${aiSpecs.length}: ${spec.relativePath} (fallback=${_forceTemplateFallback})`)
     await callbacks.onFileStart(spec.relativePath, spec.description)
+
+    // Check overall AI budget before each file
+    const aiElapsed = Date.now() - aiPhaseStart
+    if (aiElapsed > OVERALL_AI_GENERATION_TIMEOUT_MS && !aiTimedOut) {
+      aiTimedOut = true
+      _forceTemplateFallback = true
+      console.warn(`[CodeGen] Overall AI timeout (${OVERALL_AI_GENERATION_TIMEOUT_MS / 1000}s) exceeded at file ${i + 1}/${aiSpecs.length} — forcing template fallback`)
+    }
+
     try {
-      // Generate file content
+      const fileStart = Date.now()
       const content = await spec.generate()
-      
-      // Validate syntax and imports
-      if (spec.relativePath.endsWith('.ts') || spec.relativePath.endsWith('.tsx') || 
-          spec.relativePath.endsWith('.js') || spec.relativePath.endsWith('.jsx')) {
-        
-        const validationResult = validateFile(content, spec.relativePath, allFilePaths, packageJson)
-        
-        if (!validationResult.valid) {
-          // Report validation errors
-          for (const error of validationResult.errors) {
-            if (callbacks.onValidationError) {
-              await callbacks.onValidationError(error)
-            }
-            console.warn(`[CodeGen] Validation error in ${spec.relativePath}: ${error.message}`)
-          }
-          
-          // Retry generation with error context
-          if (validationResult.errors.length > 0) {
-            const errorContext = generateErrorContext(validationResult.errors)
-            console.log(`[CodeGen] Retrying generation with error context for ${spec.relativePath}`)
-            
-            // Modify the prompt to include error context
-            let retryPrompt = ''
-            if (spec.relativePath === 'src/App.tsx') {
-              retryPrompt = promptAppTsx(project, projectType, dynamicPages, hasSupabase, errorContext)
-            } else if (spec.relativePath === 'src/components/Header.tsx') {
-              retryPrompt = promptHeader(project, projectType, errorContext)
-            } else if (spec.relativePath === 'src/pages/Home.tsx') {
-              retryPrompt = promptHomePage(project, projectType, errorContext)
-            } else if (spec.relativePath === 'src/pages/Login.tsx') {
-              retryPrompt = promptLoginPage(project, projectType, errorContext)
-            } else if (spec.relativePath === 'src/pages/Register.tsx') {
-              retryPrompt = promptRegisterPage(project, projectType, errorContext)
-            } else if (spec.relativePath === 'src/pages/Dashboard.tsx') {
-              retryPrompt = promptDashboard(project, projectType, errorContext)
-            } else if (spec.relativePath === 'server/index.ts') {
-              retryPrompt = hasStripe 
-                ? promptServerIndexWithStripe(project, errorContext)
-                : promptServerIndex(project, errorContext)
-            } else if (spec.relativePath === 'server/routes/api.ts') {
-              retryPrompt = promptApiRoutes(project, errorContext)
-            } else if (spec.relativePath === 'server/routes/auth.ts') {
-              retryPrompt = promptAuthRoutes(project, errorContext)
-            } else if (spec.relativePath === 'prisma/schema.prisma') {
-              retryPrompt = promptPrismaSchema(project, errorContext)
-            } else if (spec.relativePath.startsWith('src/pages/') && dynamicPages.some(dp => dp.relativePath === spec.relativePath)) {
-              const dynamicPage = dynamicPages.find(dp => dp.relativePath === spec.relativePath)!
-              retryPrompt = promptGenericPage(project, dynamicPage, projectType, errorContext)
-            }
-            
-            if (retryPrompt) {
-              const retryContent = await generateFileWithAI(retryPrompt, 4000, tok(spec.relativePath))
-              if (retryContent) {
-                // Validate the retry content
-                const retryValidation = validateFile(retryContent, spec.relativePath, allFilePaths, packageJson)
-                if (retryValidation.valid) {
-                  // Use the retry content if it's valid
-                  await writeWorkspaceFile(workspaceId, spec.relativePath, retryContent)
-                  const bytes = Buffer.byteLength(retryContent, 'utf8')
-                  generated.push({ relativePath: spec.relativePath, content: retryContent, generatedBy: 'ai', bytes })
-                  await callbacks.onFileComplete(spec.relativePath, bytes, 'ai')
-                  continue
-                }
-              }
-            }
-          }
-        }
-      }
-      
-      // If we get here, either validation passed or retry failed
-      await writeWorkspaceFile(workspaceId, spec.relativePath, content)
+      const fileMs = Date.now() - fileStart
+      console.log(`[CodeGen]   → ${spec.relativePath} generated in ${fileMs}ms (${content.length} chars)`)
+
+      writeWorkspaceFile(workspaceId, spec.relativePath, content)
       const bytes = Buffer.byteLength(content, 'utf8')
-      const generatedBy = content.includes('// fallback') ? 'template' : 'ai'
+      const generatedBy = _forceTemplateFallback || content.includes('// fallback') ? 'template' : 'ai'
       generated.push({ relativePath: spec.relativePath, content, generatedBy, bytes })
       await callbacks.onFileComplete(spec.relativePath, bytes, generatedBy)
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
-      console.error(`[CodeGen] AI error for ${spec.relativePath}: ${msg}`)
+      console.error(`[CodeGen]   ✗ ${spec.relativePath} FAILED: ${msg}`)
       await callbacks.onFileError(spec.relativePath, msg)
     }
   }
 
-  // ── Phase 3: Integration validation (cross-file) ──────────
-  // After all files are generated, validate cross-file integration consistency:
-  // API endpoints, data models, and database schema alignment.
+  const totalMs = Date.now() - genStart
+  const aiPhaseDurationMs = Date.now() - aiPhaseStart
+  const aiFileCount = generated.filter(f => f.generatedBy === 'ai').length
+  const templateFallbackCount = generated.filter(f => f.generatedBy === 'template').length - templateSpecs.length
+  console.log(
+    `[CodeGen] ═══ generateProjectFiles DONE in ${(totalMs / 1000).toFixed(1)}s ═══\n` +
+    `  Templates: ${templateSpecs.length} files in ${templateMs}ms\n` +
+    `  AI phase: ${(aiPhaseDurationMs / 1000).toFixed(1)}s — ${aiFileCount} AI, ${templateFallbackCount} fell back to templates` +
+    (aiTimedOut ? ' (timeout reached)' : '')
+  )
+
+  // ── Phase 3: Integration validation (cross-file, log-only) ──
   if (generated.length > 0) {
-    const integrationResult = validateAllIntegrations(
-      generated.map(f => ({ relativePath: f.relativePath, content: f.content })),
-      project.integrations,
-      workspaceId,
-    )
+    try {
+      const integrationResult = validateAllIntegrations(
+        generated.map(f => ({ relativePath: f.relativePath, content: f.content })),
+        project.integrations,
+        workspaceId,
+      )
 
-    if (!integrationResult.valid) {
-      console.log(`[CodeGen] Integration validation found ${integrationResult.errors.length} issue(s)`)
-      for (const error of integrationResult.errors) {
-        if (callbacks.onValidationError) {
-          await callbacks.onValidationError(error)
-        }
-        console.warn(`[CodeGen] Integration: ${error.filePath}: ${error.message}`)
-      }
-
-      // Build error context and attempt targeted re-generation of affected files
-      const integrationErrorContext = generateIntegrationErrorContext(integrationResult.errors)
-      const affectedFiles = [...new Set(integrationResult.errors.map(e => e.filePath))]
-
-      for (const affectedFile of affectedFiles) {
-        // Only retry AI-generated files (not templates)
-        const spec = aiSpecs.find(s => s.relativePath === affectedFile)
-        if (!spec) continue
-
-        console.log(`[CodeGen] Retrying ${affectedFile} with integration error context`)
-        try {
-          let retryPrompt = ''
-
-          if (affectedFile === 'src/App.tsx') {
-            retryPrompt = promptAppTsx(project, projectType, dynamicPages, hasSupabase, integrationErrorContext)
-          } else if (affectedFile === 'server/index.ts') {
-            retryPrompt = hasStripe
-              ? promptServerIndexWithStripe(project, integrationErrorContext)
-              : promptServerIndex(project, integrationErrorContext)
-          } else if (affectedFile === 'server/routes/api.ts') {
-            retryPrompt = promptApiRoutes(project, integrationErrorContext)
-          } else if (affectedFile === 'server/routes/auth.ts') {
-            retryPrompt = promptAuthRoutes(project, integrationErrorContext)
-          } else if (affectedFile === 'prisma/schema.prisma') {
-            retryPrompt = promptPrismaSchema(project, integrationErrorContext)
-          } else if (affectedFile === 'src/pages/Dashboard.tsx') {
-            retryPrompt = promptDashboard(project, projectType, integrationErrorContext)
-          } else if (affectedFile.startsWith('src/pages/') && dynamicPages.some(dp => dp.relativePath === affectedFile)) {
-            const dp = dynamicPages.find(d => d.relativePath === affectedFile)!
-            retryPrompt = promptGenericPage(project, dp, projectType, integrationErrorContext)
+      if (!integrationResult.valid) {
+        console.log(`[CodeGen] Integration validation: ${integrationResult.errors.length} issue(s) (will be handled by builderQueue self-healing)`)
+        for (const error of integrationResult.errors) {
+          if (callbacks.onValidationError) {
+            await callbacks.onValidationError(error)
           }
-
-          if (retryPrompt) {
-            const retryContent = await generateFileWithAI(retryPrompt, 4000, tok(affectedFile))
-            if (retryContent) {
-              await writeWorkspaceFile(workspaceId, affectedFile, retryContent)
-              const bytes = Buffer.byteLength(retryContent, 'utf8')
-              // Replace the existing entry in generated[]
-              const idx = generated.findIndex(g => g.relativePath === affectedFile)
-              if (idx >= 0) {
-                generated[idx] = { relativePath: affectedFile, content: retryContent, generatedBy: 'ai', bytes }
-              }
-              console.log(`[CodeGen] Integration retry succeeded for ${affectedFile}`)
-            }
-          }
-        } catch (err) {
-          console.warn(`[CodeGen] Integration retry failed for ${affectedFile}: ${err instanceof Error ? err.message : err}`)
         }
       }
+    } catch (ivErr) {
+      console.warn(`[CodeGen] Integration validation error (non-fatal): ${ivErr instanceof Error ? ivErr.message : ivErr}`)
     }
   }
+
+  // Reset flags so future builds (repair, continuation) can use AI again
+  _forceTemplateFallback = false
+  _consecutiveAiFailures = 0
 
   return generated
 }

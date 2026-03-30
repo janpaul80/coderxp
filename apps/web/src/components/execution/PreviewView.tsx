@@ -212,7 +212,7 @@ export function PreviewView() {
                 <img
                   src="/logo-white.png"
                   alt="CoderXP"
-                  className="h-8 w-auto mb-4 opacity-30"
+                  className="h-14 w-auto mb-6 opacity-30 select-none"
                   draggable={false}
                 />
               </motion.div>

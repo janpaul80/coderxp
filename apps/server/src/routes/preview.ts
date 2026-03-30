@@ -712,14 +712,53 @@ function handlePreviewProxy(req: Request, res: Response): void {
     if (!workerBaseUrl) {
       // No remote worker URL — preview is not accessible
       res.status(503).send(
-        '<html><body style="background:#09090b;color:#a1a1aa;font-family:monospace;padding:2rem">' +
-        '<h2 style="color:#f87171">Preview not available</h2>' +
-        '<p>The preview process is not running on this server. ' +
-        (job.workerName && job.workerName !== 'local'
-          ? `Worker "${job.workerName}" is not reachable.`
-          : 'No remote worker configured.') +
-        '</p>' +
-        '</body></html>'
+        `<html>
+          <head>
+            <title>Preview Unavailable | CoderXP</title>
+            <style>
+              body {
+                background: #121215;
+                color: #e8e8e8;
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+                margin: 0;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                height: 100vh;
+                text-align: center;
+              }
+              .card {
+                background: #1D1D1D;
+                border: 1px solid rgba(255,255,255,0.08);
+                border-radius: 24px;
+                padding: 40px;
+                max-width: 400px;
+                box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+              }
+              .logo { height: 32px; margin-bottom: 24px; opacity: 0.8; }
+              h2 { font-size: 18px; margin: 0 0 12px; color: #ffffff; }
+              p { font-size: 13px; color: #a1a1aa; line-height: 1.6; margin: 0; }
+              .badge { 
+                display: inline-block; padding: 4px 12px; border-radius: 99px;
+                background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08);
+                font-size: 10px; font-weight: 600; text-transform: uppercase;
+                letter-spacing: 0.05em; color: #71717a; margin-bottom: 20px;
+              }
+            </style>
+          </head>
+          <body>
+            <div class="card">
+              <div class="badge">Builder Status</div>
+              <img src="/logo-white.png" class="logo" alt="CoderXP" />
+              <h2>Preview not ready</h2>
+              <p>The preview environment is being prepared. ${
+                job.workerName && job.workerName !== 'local'
+                  ? `Routing to cluster "${job.workerName}"...`
+                  : 'Starting internal worker...'
+              }</p>
+            </div>
+          </body>
+        </html>`
       )
       return
     }

@@ -5,7 +5,6 @@ import { useAppStore } from '@/store/appStore'
 import { useSocket } from '@/hooks/useSocket'
 import { cn, formatBytes, generateId } from '@/lib/utils'
 import { Spinner } from '@/components/ui/Spinner'
-import { mockEngine } from '@/lib/mockEngine'
 import { getSocket } from '@/lib/socket'
 import { projectsApi, chatsApi } from '@/lib/api'
 import type { UploadedFile, UploadedFileType, Project, Chat } from '@/types'
@@ -198,7 +197,16 @@ export function ChatInput() {
 
     const isSocketConnected = getSocket().connected
     if (!isSocketConnected) {
-      mockEngine.handleMessage(content, chatId)
+      // Not connected to backend — show error instead of faking a response
+      setAssistantTyping(false)
+      addMessage({
+        id: generateId(),
+        chatId,
+        role: 'assistant',
+        type: 'text',
+        content: 'Not connected to the server. Please check that the backend is running and refresh the page.',
+        createdAt: new Date().toISOString(),
+      })
     } else {
       sendMessage(chatId, content, fileIds.length > 0 ? fileIds : undefined)
     }

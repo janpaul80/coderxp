@@ -19,7 +19,7 @@ export function IdleView() {
           <img
             src="/logo-white.png"
             alt="CoderXP"
-            className="w-[200px] md:w-[260px] h-auto select-none opacity-80"
+            className="w-[300px] md:w-[400px] h-auto select-none opacity-80"
             draggable={false}
           />
         </motion.div>

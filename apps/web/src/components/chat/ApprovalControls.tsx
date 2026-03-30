@@ -1,11 +1,10 @@
 import React, { useState } from 'react'
-import { CheckCircle2, XCircle, Edit3 } from 'lucide-react'
+import { CheckCircle2, XCircle, Edit3, WifiOff } from 'lucide-react'
 import { useAppStore } from '@/store/appStore'
 import { useChatStore } from '@/store/chatStore'
 import { useSocket } from '@/hooks/useSocket'
 import { plansApi } from '@/lib/api'
 import { generateId } from '@/lib/utils'
-import { mockEngine } from '@/lib/mockEngine'
 import { getSocket } from '@/lib/socket'
 import { Button } from '@/components/ui/Button'
 import { Textarea } from '@/components/ui/Input'
@@ -19,6 +18,7 @@ export function ApprovalControls({ plan }: ApprovalControlsProps) {
   const [isModifying, setIsModifying] = useState(false)
   const [modifyText, setModifyText] = useState('')
   const [isLoading, setIsLoading] = useState<'approve' | 'reject' | 'modify' | null>(null)
+  const [connectionError, setConnectionError] = useState(false)
 
   const setActivePlan = useAppStore((s) => s.setActivePlan)
   const resetToIdle = useAppStore((s) => s.resetToIdle)
@@ -28,11 +28,25 @@ export function ApprovalControls({ plan }: ApprovalControlsProps) {
 
   const { approvePlan, rejectPlan, modifyPlan } = useSocket()
 
-  const isDemoMode = !getSocket().connected
-
   // ── Approve ───────────────────────────────────────────────
+  // CRITICAL: Always require a real backend connection.
+  // Never fall back to mock engine — fake builds are worse than showing an error.
 
   const handleApprove = async () => {
+    // Guard: require live socket connection to the backend
+    if (!getSocket().connected) {
+      setConnectionError(true)
+      addMessage({
+        id: generateId(),
+        chatId: activeChatId ?? '',
+        role: 'assistant',
+        type: 'text',
+        content: 'Cannot start build: not connected to the backend server. Please check that the server is running and refresh the page.',
+        createdAt: new Date().toISOString(),
+      })
+      return
+    }
+    setConnectionError(false)
     setIsLoading('approve')
     try {
       addMessage({
@@ -40,20 +54,25 @@ export function ApprovalControls({ plan }: ApprovalControlsProps) {
         chatId: activeChatId ?? '',
         role: 'user',
         type: 'approval_response',
-        content: '✅ Plan approved — starting build.',
+        content: 'Plan approved — starting build.',
         metadata: { approvalStatus: 'approved' },
         createdAt: new Date().toISOString(),
       })
       setActivePlan({ ...plan, status: 'approved' })
 
-      if (isDemoMode) {
-        mockEngine.handleApproval(plan.id, activeProjectId ?? '')
-      } else {
-        await plansApi.approve(plan.id)
-        approvePlan(plan.id, activeProjectId ?? '')
-      }
+      // Call REST to persist status, then emit socket event to queue the build
+      await plansApi.approve(plan.id)
+      approvePlan(plan.id, activeProjectId ?? '')
     } catch (err) {
       console.error('Approve failed:', err)
+      addMessage({
+        id: generateId(),
+        chatId: activeChatId ?? '',
+        role: 'assistant',
+        type: 'text',
+        content: `Build failed to start: ${err instanceof Error ? err.message : 'Unknown error'}. Please try again.`,
+        createdAt: new Date().toISOString(),
+      })
     } finally {
       setIsLoading(null)
     }
@@ -62,6 +81,11 @@ export function ApprovalControls({ plan }: ApprovalControlsProps) {
   // ── Reject ────────────────────────────────────────────────
 
   const handleReject = async () => {
+    if (!getSocket().connected) {
+      setConnectionError(true)
+      return
+    }
+    setConnectionError(false)
     setIsLoading('reject')
     try {
       addMessage({
@@ -69,18 +93,14 @@ export function ApprovalControls({ plan }: ApprovalControlsProps) {
         chatId: activeChatId ?? '',
         role: 'user',
         type: 'approval_response',
-        content: "❌ Plan rejected. Let me know what you'd like to change.",
+        content: "Plan rejected. Let me know what you'd like to change.",
         metadata: { approvalStatus: 'rejected' },
         createdAt: new Date().toISOString(),
       })
 
-      if (isDemoMode) {
-        mockEngine.handleRejection(plan.id)
-      } else {
-        await plansApi.reject(plan.id)
-        rejectPlan(plan.id)
-        resetToIdle()
-      }
+      await plansApi.reject(plan.id)
+      rejectPlan(plan.id)
+      resetToIdle()
     } catch (err) {
       console.error('Reject failed:', err)
     } finally {
@@ -92,6 +112,11 @@ export function ApprovalControls({ plan }: ApprovalControlsProps) {
 
   const handleModify = async () => {
     if (!modifyText.trim()) return
+    if (!getSocket().connected) {
+      setConnectionError(true)
+      return
+    }
+    setConnectionError(false)
     setIsLoading('modify')
     try {
       addMessage({
@@ -99,17 +124,13 @@ export function ApprovalControls({ plan }: ApprovalControlsProps) {
         chatId: activeChatId ?? '',
         role: 'user',
         type: 'approval_response',
-        content: `📝 Modification requested: ${modifyText}`,
+        content: `Modification requested: ${modifyText}`,
         metadata: { approvalStatus: 'modified' },
         createdAt: new Date().toISOString(),
       })
 
-      if (isDemoMode) {
-        mockEngine.handleModification(plan.id, modifyText)
-      } else {
-        await plansApi.modify(plan.id, modifyText)
-        modifyPlan(plan.id, modifyText)
-      }
+      await plansApi.modify(plan.id, modifyText)
+      modifyPlan(plan.id, modifyText)
 
       setIsModifying(false)
       setModifyText('')
@@ -193,6 +214,16 @@ export function ApprovalControls({ plan }: ApprovalControlsProps) {
           >
             Reject
           </Button>
+        </div>
+      )}
+
+      {/* ── Connection error ─────────────────────────────── */}
+      {connectionError && (
+        <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/20">
+          <WifiOff className="w-3.5 h-3.5 text-red-400 shrink-0" />
+          <p className="text-2xs text-red-300">
+            Not connected to the server. Please check that the backend is running and refresh the page.
+          </p>
         </div>
       )}
 

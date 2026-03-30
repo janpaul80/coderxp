@@ -82,7 +82,7 @@ let blackboxKeyIndex = 0
 // All provider fetch calls go through fetchWithTimeout to prevent
 // hung builds when a provider is unresponsive.
 
-const DEFAULT_FETCH_TIMEOUT_MS = 90_000
+const DEFAULT_FETCH_TIMEOUT_MS = 25_000  // 25s — must be under the 30s per-file timeout in codeGenerator
 
 async function fetchWithTimeout(
 url: string,
@@ -191,8 +191,8 @@ return true
 
 async function withRetry<T>(
 fn: () => Promise<T>,
-maxRetries = 2,
-baseDelayMs = 1000
+maxRetries = 1,
+baseDelayMs = 500
 ): Promise<T> {
 let lastErr: unknown
 for (let attempt = 0; attempt <= maxRetries; attempt++) {
