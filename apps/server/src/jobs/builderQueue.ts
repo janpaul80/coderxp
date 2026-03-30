@@ -1635,18 +1635,27 @@ try {
             // Re-validate after repair
             const recheck = await validatePreviewContent(previewInstance.url)
             if (!recheck.valid) {
-              await addLog('info', `SELF-HEAL: preview still broken after repair (${recheck.reason}) — completing anyway`, 'complete')
-            } else {
-              await addLog('success', 'SELF-HEAL: preview content now valid after repair', 'complete')
+              await addLog('error', `SELF-HEAL FAILED: preview still broken after repair (${recheck.reason})`, 'complete')
               emitToUser(userId, 'chat:message', {
-                id: `self-heal-ok-${jobId}-${Date.now()}`,
+                id: `self-heal-fail-${jobId}-${Date.now()}`,
                 chatId: '',
                 role: 'assistant',
                 type: 'text',
-                content: 'Fixed! The preview is now rendering correctly.',
+                content: `The preview isn't rendering correctly. I tried to fix it but the issue persists (${recheck.reason}). The build will be marked as failed so we can investigate.`,
                 createdAt: new Date().toISOString(),
               })
+              // HARD RULE: Do NOT emit job:complete on a broken preview.
+              throw new Error(`Preview content validation failed after self-heal: ${recheck.reason}`)
             }
+            await addLog('success', 'SELF-HEAL: preview content now valid after repair', 'complete')
+            emitToUser(userId, 'chat:message', {
+              id: `self-heal-ok-${jobId}-${Date.now()}`,
+              chatId: '',
+              role: 'assistant',
+              type: 'text',
+              content: 'Fixed! The preview is now rendering correctly.',
+              createdAt: new Date().toISOString(),
+            })
           }
 
           // Store the browser-accessible relative URL (not localhost) in the DB

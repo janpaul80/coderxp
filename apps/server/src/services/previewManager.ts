@@ -406,8 +406,30 @@ export async function validatePreviewContent(
   onLog?: (msg: string) => void,
 ): Promise<{ valid: boolean; reason: string }> {
   const log = onLog ?? (() => {})
+
+  // Retry up to 3 times with increasing timeouts.
+  // Vite may still be pre-bundling on the first attempt.
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const result = await _validateOnce(url, log, attempt)
+    if (result.valid) return result
+    if (attempt < 3) {
+      log(`Content validation attempt ${attempt} failed (${result.reason}) — retrying in 5s...`)
+      await new Promise(r => setTimeout(r, 5000))
+    } else {
+      return result
+    }
+  }
+  return { valid: false, reason: 'All validation attempts failed' }
+}
+
+async function _validateOnce(
+  url: string,
+  log: (msg: string) => void,
+  attempt: number,
+): Promise<{ valid: boolean; reason: string }> {
   try {
-    const { status, body } = await httpGetBody(url, 15000)
+    const timeout = 20000 + (attempt - 1) * 10000 // 20s, 30s, 40s
+    const { status, body } = await httpGetBody(url, timeout)
 
     if (status >= 400) {
       return { valid: false, reason: `HTTP ${status} error` }
@@ -799,17 +821,33 @@ export async function startPreview(
   //   2. Vite pre-bundles and responds (typically 20-40s)
   //   3. preview:ready is emitted — vite is fully ready
   //   4. Test/browser fetches app URL → vite responds immediately (cache hit)
+  // Warm-up: trigger Vite pre-bundling with retries.
+  // The first request to the app URL forces Vite to compile all dependencies.
+  // Without this, the browser gets a 503 or timeout on first load.
   onLog(makePreviewLog(jobId, 'info', `WARM-UP: triggering vite pre-bundling at ${appUrl} (timeout: 120s)`))
-  const warmupStart = Date.now()
-  try {
-    const warmupStatus = await httpGet(appUrl, 120_000)
-    const warmupSec = ((Date.now() - warmupStart) / 1000).toFixed(1)
-    onLog(makePreviewLog(jobId, 'success', `WARM-UP: vite pre-bundling complete in ${warmupSec}s (HTTP ${warmupStatus})`))
-  } catch (warmupErr) {
-    const warmupSec = ((Date.now() - warmupStart) / 1000).toFixed(1)
-    const msg = warmupErr instanceof Error ? warmupErr.message : String(warmupErr)
-    // Non-fatal: log and proceed. The proxy will handle the first real request.
-    onLog(makePreviewLog(jobId, 'run', `WARM-UP: ${msg} after ${warmupSec}s — proceeding (proxy will handle first request)`))
+  let warmupOk = false
+  for (let warmupAttempt = 1; warmupAttempt <= 3; warmupAttempt++) {
+    const warmupStart = Date.now()
+    try {
+      const warmupStatus = await httpGet(appUrl, 120_000)
+      const warmupSec = ((Date.now() - warmupStart) / 1000).toFixed(1)
+      if (warmupStatus >= 200 && warmupStatus < 400) {
+        onLog(makePreviewLog(jobId, 'success', `WARM-UP: vite pre-bundling complete in ${warmupSec}s (HTTP ${warmupStatus})`))
+        warmupOk = true
+        break
+      }
+      // 503 = Vite not ready yet, retry after a short delay
+      onLog(makePreviewLog(jobId, 'run', `WARM-UP attempt ${warmupAttempt}: HTTP ${warmupStatus} — retrying in 3s...`))
+      await new Promise(r => setTimeout(r, 3000))
+    } catch (warmupErr) {
+      const warmupSec = ((Date.now() - warmupStart) / 1000).toFixed(1)
+      const msg = warmupErr instanceof Error ? warmupErr.message : String(warmupErr)
+      onLog(makePreviewLog(jobId, 'run', `WARM-UP attempt ${warmupAttempt}: ${msg} after ${warmupSec}s — retrying...`))
+      await new Promise(r => setTimeout(r, 3000))
+    }
+  }
+  if (!warmupOk) {
+    onLog(makePreviewLog(jobId, 'info', `WARM-UP: failed after 3 attempts — preview may load slowly`))
   }
 
   const startDurationMs = Date.now() - viteStart
