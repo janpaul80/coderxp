@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
+import Editor, { useMonaco } from '@monaco-editor/react'
 import {
   Loader2, Code2, Terminal,
   ChevronDown, ChevronUp,
@@ -77,17 +78,26 @@ function ActiveAgentBar() {
 
 function StreamingCodePanel() {
   const streamingFile = useAppStore((s) => s.streamingFile)
-  const endRef = useRef<HTMLDivElement>(null)
+  const editorRef = useRef<any>(null)
 
   useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: 'instant' })
+    if (editorRef.current && streamingFile?.content) {
+      const model = editorRef.current.getModel()
+      if (model) {
+        editorRef.current.revealLine(model.getLineCount())
+      }
+    }
   }, [streamingFile?.content])
 
   if (!streamingFile) return null
 
-  const lines = streamingFile.content.split('\n')
-  const displayLines = lines.length > 30 ? lines.slice(-30) : lines
-  const startLineNum = lines.length > 30 ? lines.length - 30 + 1 : 1
+  // Determine language based on extension
+  const path = streamingFile.path.toLowerCase()
+  let language = 'typescript'
+  if (path.endsWith('.css')) language = 'css'
+  else if (path.endsWith('.html')) language = 'html'
+  else if (path.endsWith('.json')) language = 'json'
+  else if (path.endsWith('.md')) language = 'markdown'
 
   return (
     <motion.div
@@ -96,11 +106,11 @@ function StreamingCodePanel() {
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
       transition={{ duration: 0.15 }}
-      className="flex flex-col min-h-0 bg-[#0C0C0E]"
+      className="flex flex-col min-h-0 bg-[#1e1e1e]"
       style={{ flex: '1 1 60%' }}
     >
       {/* File path tab */}
-      <div className="flex items-center gap-2 px-4 py-1.5 border-b border-white/[0.04] bg-white/[0.015] shrink-0">
+      <div className="flex items-center gap-2 px-4 py-1.5 border-b border-white/[0.04] bg-[#1e1e1e] shrink-0">
         <Code2 className="w-3 h-3 text-accent/50 shrink-0" />
         <span className="font-mono text-2xs text-accent/70 truncate flex-1 min-w-0">
           {streamingFile.path}
@@ -112,24 +122,35 @@ function StreamingCodePanel() {
       </div>
 
       {/* Code content */}
-      <div className="flex-1 min-h-0 overflow-y-auto px-0 py-2">
-        <pre className="font-mono text-2xs leading-[1.7] text-white/60 whitespace-pre-wrap break-all">
-          {displayLines.map((line, i) => (
-            <div key={i} className="flex hover:bg-white/[0.02] transition-colors">
-              <span className="text-white/15 select-none w-10 text-right shrink-0 tabular-nums px-2 border-r border-white/[0.04]">
-                {startLineNum + i}
-              </span>
-              <span className="pl-3 flex-1">{line}</span>
-            </div>
-          ))}
-          <div className="flex">
-            <span className="w-10 shrink-0 border-r border-white/[0.04]" />
-            <span className="pl-3">
-              <span className="inline-block w-[6px] h-[13px] bg-accent/80 align-middle animate-pulse" />
-            </span>
-          </div>
-        </pre>
-        <div ref={endRef} />
+      <div className="flex-1 min-h-0">
+        <Editor
+          height="100%"
+          language={language}
+          theme="vs-dark"
+          value={streamingFile.content + '█'}
+          onMount={(editor) => {
+            editorRef.current = editor
+            const model = editor.getModel()
+            if (model) {
+              editor.revealLine(model.getLineCount())
+            }
+          }}
+          options={{
+            readOnly: true,
+            minimap: { enabled: false },
+            scrollBeyondLastLine: false,
+            wordWrap: 'on',
+            fontSize: 12,
+            fontFamily: "'JetBrains Mono', 'Fira Code', 'Menlo', 'Monaco', 'Courier New', monospace",
+            lineNumbers: 'on',
+            folding: false,
+            renderLineHighlight: 'none',
+            matchBrackets: 'never',
+            smoothScrolling: true,
+            cursorStyle: 'block', // Ghostwriter vibe
+            cursorBlinking: 'smooth',
+          }}
+        />
       </div>
     </motion.div>
   )
