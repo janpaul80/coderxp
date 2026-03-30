@@ -1,9 +1,7 @@
 import React, { useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useChatStore } from '@/store/chatStore'
-import { useAppStore } from '@/store/appStore'
 import { ChatMessage } from './ChatMessage'
-import { ApprovalControls } from './ApprovalControls'
 import { TypingDots } from '@/components/ui/Spinner'
 import { Zap } from 'lucide-react'
 
@@ -90,8 +88,6 @@ function AssistantTyping() {
 export function ChatThread() {
   const messages = useChatStore((s) => s.messages)
   const isAssistantTyping = useChatStore((s) => s.isAssistantTyping)
-  const activePlan = useAppStore((s) => s.activePlan)
-  const appMode = useAppStore((s) => s.appMode)
 
   const bottomRef = useRef<HTMLDivElement>(null)
 
@@ -117,12 +113,6 @@ export function ChatThread() {
                 transition={{ duration: 0.2 }}
               >
                 <ChatMessage message={message} />
-                {/* Inline approval controls for plan messages */}
-                {message.metadata?.plan && appMode === 'awaiting_approval' && (
-                  <div className="px-4 py-2 ml-9">
-                    <ApprovalControls plan={message.metadata.plan} />
-                  </div>
-                )}
               </motion.div>
             ))}
           </AnimatePresence>

@@ -33,6 +33,8 @@ export function PreviewView() {
   const [publishAction, setPublishAction] = useState<'archive' | 'github' | 'vercel'>('archive')
   const iframeRef = React.useRef<HTMLIFrameElement>(null)
   const [summaryExpanded, setSummaryExpanded] = useState(true)
+  const [iframeLoaded, setIframeLoaded] = useState(false)
+  const [iframeError, setIframeError] = useState(false)
 
   useEffect(() => {
     if (!buildSummary) return
@@ -41,14 +43,31 @@ export function PreviewView() {
     return () => clearTimeout(t)
   }, [buildSummary])
 
+  // Reset iframe state when URL changes
+  useEffect(() => {
+    setIframeLoaded(false)
+    setIframeError(false)
+  }, [previewUrl, iframeKey])
+
+  // Timeout: if iframe hasn't loaded in 15s, show warning
+  useEffect(() => {
+    if (!previewUrl || iframeLoaded || iframeError) return
+    const t = setTimeout(() => {
+      if (!iframeLoaded) setIframeError(true)
+    }, 15000)
+    return () => clearTimeout(t)
+  }, [previewUrl, iframeLoaded, iframeError, iframeKey])
+
   const url = previewUrl ?? 'about:blank'
   const isLive = !!previewUrl
-  const previewFailed = activeJob?.previewStatus === 'failed' && !previewUrl
+  const previewFailed = (activeJob?.previewStatus === 'failed' && !previewUrl) || iframeError
   const previewPort = activeJob?.previewPort
   const jobId = activeJob?.id ?? ''
 
   const handleRefresh = useCallback(() => {
     setIsRefreshing(true)
+    setIframeLoaded(false)
+    setIframeError(false)
     setIframeKey((k) => k + 1)
     setTimeout(() => setIsRefreshing(false), 800)
   }, [])
@@ -174,7 +193,7 @@ export function PreviewView() {
           className="h-full rounded-xl overflow-hidden border border-white/[0.06]"
           style={{ minWidth: '320px', maxWidth: '100%' }}
         >
-          {isLive ? (
+          {isLive && !previewFailed ? (
             <iframe
               ref={iframeRef}
               key={iframeKey}
@@ -182,6 +201,8 @@ export function PreviewView() {
               className="w-full h-full border-0 bg-white"
               title="App Preview"
               sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+              onLoad={() => setIframeLoaded(true)}
+              onError={() => setIframeError(true)}
             />
           ) : previewFailed ? (
             <div className="w-full h-full flex flex-col items-center justify-center bg-transparent px-8">

@@ -299,16 +299,15 @@ export function ChatInput() {
 
   // ── State ─────────────────────────────────────────────────
 
-  const isDisabled = appMode === 'building' || isStreaming
+  // Chat is always enabled — users can talk to the agent at any time, even during builds
+  const isDisabled = isStreaming
   const canSend = (inputValue.trim().length > 0 || pendingFiles.length > 0) && !isDisabled
 
   const placeholder =
-    appMode === 'building'
-      ? 'Building your app...'
-      : appMode === 'awaiting_approval'
-      ? 'Approve the plan above or ask for changes...'
+    appMode === 'building' || appMode === 'repair'
+      ? 'Chat with the agent while it builds...'
       : appMode === 'planning'
-      ? 'Agent is thinking...'
+      ? 'Agent is working...'
       : 'Describe what you want to build...'
 
   const imageFiles = pendingFiles.filter((f) => f.type === 'image')

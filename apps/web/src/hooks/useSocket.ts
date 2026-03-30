@@ -106,13 +106,24 @@ export function useSocket() {
     // ── Typing indicator ──────────────────────────────────
     s.on('chat:typing', ({ typing }: { typing: boolean }) => {
       setAssistantTyping(typing)
+      // When the agent starts working, transition the right panel to show
+      // the planning/terminal view instead of the idle logo screen.
+      // This gives immediate feedback that something is happening.
+      if (typing) {
+        const currentMode = useAppStore.getState().appMode
+        if (currentMode === 'idle') {
+          useAppStore.getState().transitionToPlanning()
+        }
+      }
     })
 
     // ── Plan events ───────────────────────────────────────
+    // plan:created is only emitted as a fallback (auto-approve failed).
+    // Store the plan but don't block the UI — the build will start via job:created.
     s.on('plan:created', (plan: Plan) => {
-      // Transition right panel to awaiting approval
-      // The chat:message event (emitted right after) carries the plan message
-      useAppStore.getState().transitionToAwaitingApproval(plan)
+      useAppStore.getState().setActivePlan(plan)
+      // Show planning view only briefly — job:created will override immediately
+      useAppStore.getState().transitionToPlanning()
     })
 
     s.on('plan:updated', (plan: Plan) => {
@@ -255,8 +266,8 @@ export function useSocket() {
         id: `complete-${jobId}`,
         chatId: '',
         role: 'assistant',
-        type: 'build_complete',
-        content: '✅ Your app has been built successfully! You can see the live preview on the right.',
+        type: 'text',
+        content: `Done — your app is live in the preview. ${fileCount} files generated in ${startedAt > 0 ? `${Math.round((completedAt - startedAt) / 1000)}s` : 'a few seconds'}.`,
         createdAt: new Date().toISOString(),
       }
       addMessage(completeMessage)

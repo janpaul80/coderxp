@@ -1068,12 +1068,71 @@ async function handleWithAI(
         },
       })
 
-      // Emit plan:created so frontend transitions to awaiting_approval
-      socket.emit('plan:created', plan)
-      // Include full plan in message metadata so approval controls render inline
+      // Include full plan in message metadata (conversational — no approval gate)
       socket.emit('chat:message', { ...message, metadata: { planId: plan.id, plan } })
 
       console.log(`[Socket] AI plan ${plan.id} created for chat ${chatId} (${metadata.durationMs}ms, model=${metadata.model})`)
+
+      // ── Auto-approve: skip the approval gate entirely ──────────
+      // The user sees the plan as a conversational message and the build
+      // starts immediately.  If they want changes they can chat during the build.
+      try {
+        await prisma.plan.update({
+          where: { id: plan.id },
+          data: { status: 'approved', approvedAt: new Date() },
+        })
+
+        void recordPlanApproved(projectId, userId, {
+          summary: typeof plan.summary === 'string' ? plan.summary : '',
+          techStack: (plan.techStack as Record<string, unknown>) ?? {},
+          integrations: Array.isArray(plan.integrations) ? plan.integrations as string[] : [],
+        })
+
+        const activeJobForAuto = await prisma.job.findFirst({
+          where: { projectId, status: { in: [...ACTIVE_JOB_STATUSES] } },
+        })
+        if (activeJobForAuto) {
+          await persistAndEmitAssistantMessage(socket, chatId,
+            'A build is already in progress for this project. I\'ll start this one when it finishes.',
+            'text'
+          )
+        } else {
+          const job = await prisma.job.create({
+            data: { projectId, planId: plan.id, status: 'queued' },
+          })
+          await prisma.project.update({
+            where: { id: projectId },
+            data: { status: 'building' },
+          })
+          socket.emit('job:created', job)
+
+          const autoStrategy = createExecutionStrategy(
+            typeof plan.summary === 'string' ? plan.summary : '',
+            { mode: 'build', existingPlan: plan as Record<string, unknown> }
+          )
+          emitPipelineStatus('running', `Build started: ${autoStrategy.activeAgents.length} agents activated`, {
+            totalTasks: autoStrategy.tasks.length,
+            completedTasks: 0,
+            activeAgents: autoStrategy.activeAgents,
+          })
+          for (const agentRole of autoStrategy.activeAgents) {
+            emitAgentStatus(agentRole, 'waiting', `${agentRole}: queued`)
+          }
+
+          const autoSelection = selectWorker(builderQueue!)
+          await prisma.job.update({
+            where: { id: job.id },
+            data: { workerName: autoSelection.workerName, workerSelectedReason: autoSelection.selectedReason },
+          })
+          await autoSelection.queue.add('build', {
+            jobId: job.id, projectId, planId: plan.id, userId, socketId: socket.id,
+          })
+          console.log(`[Socket] Auto-approved build job ${job.id} on ${autoSelection.queueName}`)
+        }
+      } catch (autoErr) {
+        console.error('[Socket] Auto-approve failed, falling back to manual approval:', autoErr)
+        socket.emit('plan:created', plan)
+      }
     } catch (err) {
       if (err instanceof LLMUnavailableError) {
         await persistAndEmitAssistantMessage(socket, chatId,
