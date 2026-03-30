@@ -65,7 +65,7 @@ export async function handleRuntimeErrorReport(req: Request, res: Response): Pro
     const errorHash = generateErrorHash(normalizedError)
     
     // Check if this error already exists
-    const existingError = await prisma.runtimeError.findFirst({
+    const existingError = await (prisma as any).runtimeError.findFirst({
       where: {
         projectId,
         errorHash,
@@ -74,7 +74,7 @@ export async function handleRuntimeErrorReport(req: Request, res: Response): Pro
 
     if (existingError) {
       // Update existing error
-      await prisma.runtimeError.update({
+      await (prisma as any).runtimeError.update({
         where: { id: existingError.id },
         data: {
           occurrences: { increment: 1 },
@@ -90,7 +90,7 @@ export async function handleRuntimeErrorReport(req: Request, res: Response): Pro
       res.status(200).json({ success: true, errorId: existingError.id, new: false })
     } else {
       // Create new error
-      const newError = await prisma.runtimeError.create({
+      const newError = await (prisma as any).runtimeError.create({
         data: {
           projectId,
           userId: project.userId,
@@ -124,7 +124,7 @@ export async function handleRuntimeErrorReport(req: Request, res: Response): Pro
  * Get all runtime errors for a project
  */
 export async function getProjectRuntimeErrors(projectId: string) {
-  return prisma.runtimeError.findMany({
+  return (prisma as any).runtimeError.findMany({
     where: { projectId },
     orderBy: { lastSeen: 'desc' },
   })
@@ -134,7 +134,7 @@ export async function getProjectRuntimeErrors(projectId: string) {
  * Get a specific runtime error by ID
  */
 export async function getRuntimeError(errorId: string) {
-  return prisma.runtimeError.findUnique({
+  return (prisma as any).runtimeError.findUnique({
     where: { id: errorId },
   })
 }
@@ -146,7 +146,7 @@ export async function updateRuntimeErrorStatus(
   errorId: string,
   status: 'new' | 'analyzing' | 'repairing' | 'resolved' | 'ignored'
 ) {
-  return prisma.runtimeError.update({
+  return (prisma as any).runtimeError.update({
     where: { id: errorId },
     data: { status },
   })

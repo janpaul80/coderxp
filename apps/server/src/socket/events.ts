@@ -416,7 +416,7 @@ export function registerSocketEvents(io: Server) {
             })
 
             // Add assistant message
-            const planConversation = formatPlanAsConversation(refinedPlan)
+            const planConversation = formatPlanAsConversation(refinedPlan as any)
             const message = await prisma.message.create({
               data: {
                 chatId: plan.chatId,
@@ -916,7 +916,7 @@ async function handleWithAI(
         })
         await savePlannerRun({ chatId, projectId, planId: plan.id, userRequest: content, metadata })
 
-        const planConvo = formatPlanAsConversation(plan)
+        const planConvo = formatPlanAsConversation(plan as any)
         const msg = await prisma.message.create({
           data: {
             chatId,
@@ -1053,7 +1053,7 @@ async function handleWithAI(
         metadata,
       })
 
-      const planConvoContent = formatPlanAsConversation(plan)
+      const planConvoContent = formatPlanAsConversation(plan as any)
       const message = await prisma.message.create({
         data: {
           chatId,

@@ -17,7 +17,7 @@ import {
 } from '../agents'
 import { pluginRegistry } from '../services/pluginSystem'
 
-export const agentsRouter = Router()
+export const agentsRouter: Router = Router()
 
 // ─── GET /api/agents/status ──────────────────────────────────
 // Returns the full registry status for diagnostics.

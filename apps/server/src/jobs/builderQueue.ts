@@ -502,7 +502,7 @@ try {
             const logStep: BuildLogStep =
               phase === 'installing' ? 'install_deps'
               : phase === 'starting' ? 'preview_start'
-              : phase === 'warmup' ? 'preview_start'
+              : (phase as any) === 'warmup' ? 'preview_start'
               : 'preview_healthcheck'
             await addLog('info', `phase:${phase}`, logStep, meta ?? {})
           },
@@ -1295,11 +1295,10 @@ try {
           await addLog('info', 'REFACTOR ANALYSIS: scanning for code smells and improvement opportunities...', 'code_quality', {})
           try {
             const smellReport = detectCodeSmells(workspacePath)
-            const totalSmells = smellReport.reduce((sum, s) => sum + s.instances.length, 0)
+            const totalSmells = smellReport.smells.length
 
             if (totalSmells > 0) {
-              await addLog('info', `CODE SMELLS: ${totalSmells} issues detected across ${smellReport.length} categories`, 'code_quality', {
-                smellCategories: smellReport.length,
+              await addLog('info', `CODE SMELLS: ${totalSmells} issues detected`, 'code_quality', {
                 totalSmells,
               })
 
@@ -1334,7 +1333,7 @@ try {
               }
 
               // Build refactor context and inject into CodeGenProject
-              const refactorCtx = buildRefactorContext(smellReport, refactorPlans, depReport)
+              const refactorCtx = buildRefactorContext(smellReport, refactorPlans as any, depReport as any, migrations as any)
               if (refactorCtx) {
                 codeGenProject.memoryContext = (codeGenProject.memoryContext ?? '') +
                   '\n\n' + refactorCtx

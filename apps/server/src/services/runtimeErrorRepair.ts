@@ -34,7 +34,7 @@ export async function repairRuntimeError(
 ) {
   // Get error details if only ID was provided
   const errorRecord = typeof errorId === 'string'
-    ? await prisma.runtimeError.findUnique({ where: { id: errorId } })
+    ? await (prisma as any).runtimeError.findUnique({ where: { id: errorId } })
     : errorId
 
   if (!errorRecord) {
@@ -69,7 +69,7 @@ export async function repairRuntimeError(
   }
 
   // Update error status to analyzing
-  await prisma.runtimeError.update({
+  await (prisma as any).runtimeError.update({
     where: { id: errorRecord.id },
     data: {
       status: 'analyzing',
@@ -116,7 +116,7 @@ async function processRuntimeErrorRepair(
 ) {
   try {
     // Get full error details
-    const error = await prisma.runtimeError.findUnique({
+    const error = await (prisma as any).runtimeError.findUnique({
       where: { id: errorRecord.id }
     })
 
@@ -163,7 +163,7 @@ async function processRuntimeErrorRepair(
     await updateJobStatus(jobId, `Repairing ${affectedFiles.length} affected file(s)`, 40)
 
     // Update error status to repairing
-    await prisma.runtimeError.update({
+    await (prisma as any).runtimeError.update({
       where: { id: error.id },
       data: { status: 'repairing' }
     })
@@ -210,7 +210,7 @@ async function processRuntimeErrorRepair(
     }
 
     // Execute repair
-    await repairProjectFiles(job.workspacePath, repairProject, affectedFiles, repairCallbacks)
+    await repairProjectFiles(job.workspacePath, repairProject as any, affectedFiles, repairCallbacks)
 
     // Update job status
     await updateJobStatus(jobId, 'Repair completed', 100)
@@ -225,7 +225,7 @@ async function processRuntimeErrorRepair(
     })
 
     // Update error status to resolved
-    await prisma.runtimeError.update({
+    await (prisma as any).runtimeError.update({
       where: { id: error.id },
       data: {
         status: 'resolved',
@@ -260,7 +260,7 @@ async function processRuntimeErrorRepair(
     })
 
     // Update error status back to new
-    await prisma.runtimeError.update({
+    await (prisma as any).runtimeError.update({
       where: { id: errorRecord.id },
       data: { status: 'new' }
     })

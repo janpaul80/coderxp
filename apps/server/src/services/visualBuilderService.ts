@@ -15,6 +15,7 @@
  */
 
 import { parse, type ParserOptions, type ParserPlugin } from '@babel/parser'
+// @ts-ignore
 import type {
   File as BabelFile,
   Node,
@@ -36,6 +37,7 @@ import type {
   JSXSpreadAttribute,
   VariableDeclaration,
   Program,
+// @ts-ignore
 } from '@babel/types'
 
 // ─── Types ────────────────────────────────────────────────────
@@ -203,14 +205,14 @@ function extractClassName(attrs: (JSXAttribute | JSXSpreadAttribute)[]): string 
         for (const arg of expr.arguments) {
           if (arg.type === 'StringLiteral') strs.push(arg.value)
           if (arg.type === 'TemplateLiteral') {
-            strs.push(arg.quasis.map(q => q.value.raw).join(' '))
+            strs.push(arg.quasis.map((q: any) => q.value.raw).join(' '))
           }
         }
         return strs.join(' ')
       }
       if (expr.type === 'StringLiteral') return expr.value
       if (expr.type === 'TemplateLiteral') {
-        return expr.quasis.map(q => q.value.raw).join(' ')
+        return expr.quasis.map((q: any) => q.value.raw).join(' ')
       }
     }
   }
@@ -290,7 +292,7 @@ function extractVisualTree(
 
     // Check if text-only
     const isTextOnly = jsx.children.every(
-      c => c.type === 'JSXText' || (c.type === 'JSXExpressionContainer' && c.expression.type === 'StringLiteral')
+      (c: any) => c.type === 'JSXText' || (c.type === 'JSXExpressionContainer' && c.expression.type === 'StringLiteral')
     )
 
     // Recurse into children

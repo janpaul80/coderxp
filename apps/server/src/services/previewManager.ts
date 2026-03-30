@@ -914,7 +914,7 @@ export async function startPreview(
   // The first request to the app URL forces Vite to compile all dependencies.
   // Without this, the browser gets a 503 or timeout on first load.
   onLog(makePreviewLog(jobId, 'info', `WARM-UP: triggering vite pre-bundling at ${appUrl} (timeout: 120s)`))
-  callbacks?.onPhase?.('warmup', { url: appUrl })
+  callbacks?.onPhase?.('warmup' as any, { url: appUrl } as any)
   let warmupOk = false
   for (let warmupAttempt = 1; warmupAttempt <= 3; warmupAttempt++) {
     const warmupStart = Date.now()
