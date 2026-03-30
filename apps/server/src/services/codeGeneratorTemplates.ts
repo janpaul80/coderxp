@@ -37,7 +37,12 @@ export function templateTsConfig(): string {
 }
 
 export function templateViteConfig(): string {
-  return `import { defineConfig } from 'vite'\nimport react from '@vitejs/plugin-react'\nimport path from 'path'\nexport default defineConfig({\n  plugins: [react()],\n  resolve: { alias: { '@': path.resolve(__dirname, './src') } },\n  server: { port: 5173, proxy: { '/api': { target: 'http://localhost:3001', changeOrigin: true }, '/socket.io': { target: 'http://localhost:3001', ws: true, changeOrigin: true } } },\n  build: { outDir: 'dist', sourcemap: false, rollupOptions: { output: { manualChunks: { vendor: ['react', 'react-dom', 'react-router-dom'] } } } },\n})\n`
+  // NOTE: No proxy config. In preview mode, the app is served through CoderXP's
+  // own reverse proxy at /api/preview/{id}/app/. A Vite proxy to localhost:3001
+  // would intercept ALL /api/* requests (including the preview URL itself) and
+  // forward them to a non-existent backend, causing EADDRNOTAVAIL / 503 errors.
+  // The server/ folder is scaffolding for standalone deployment, not preview.
+  return `import { defineConfig } from 'vite'\nimport react from '@vitejs/plugin-react'\nimport path from 'path'\nexport default defineConfig({\n  plugins: [react()],\n  resolve: { alias: { '@': path.resolve(__dirname, './src') } },\n  server: { port: 5173 },\n  build: { outDir: 'dist', sourcemap: false, rollupOptions: { output: { manualChunks: { vendor: ['react', 'react-dom', 'react-router-dom'] } } } },\n})\n`
 }
 
 export function templateIndexHtml(project: CodeGenProject): string {
