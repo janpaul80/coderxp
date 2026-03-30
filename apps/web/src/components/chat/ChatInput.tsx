@@ -308,7 +308,7 @@ export function ChatInput() {
       : appMode === 'awaiting_approval'
       ? 'Approve the plan above or ask for changes...'
       : appMode === 'planning'
-      ? 'Analyzing your request...'
+      ? 'Agent is thinking...'
       : 'Describe what you want to build...'
 
   const imageFiles = pendingFiles.filter((f) => f.type === 'image')

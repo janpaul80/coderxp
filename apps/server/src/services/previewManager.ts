@@ -376,6 +376,70 @@ function httpGet(url: string, timeoutMs = 3000): Promise<number> {
   })
 }
 
+/** Fetch URL body as string (for content validation). */
+function httpGetBody(url: string, timeoutMs = 10000): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const req = http.get(url, (res) => {
+      const chunks: Buffer[] = []
+      res.on('data', (chunk: Buffer) => chunks.push(chunk))
+      res.on('end', () => {
+        resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString('utf-8') })
+      })
+    })
+    req.setTimeout(timeoutMs, () => {
+      req.destroy()
+      reject(new Error('timeout'))
+    })
+    req.on('error', reject)
+  })
+}
+
+/**
+ * Validates that a preview URL is serving real content — not a blank page,
+ * a Vite error overlay, or a 404/500. Used before emitting job:complete
+ * so the agent never declares "Build Complete" on a blank screen.
+ *
+ * Returns { valid, reason } where valid=false means the preview is broken.
+ */
+export async function validatePreviewContent(
+  url: string,
+  onLog?: (msg: string) => void,
+): Promise<{ valid: boolean; reason: string }> {
+  const log = onLog ?? (() => {})
+  try {
+    const { status, body } = await httpGetBody(url, 15000)
+
+    if (status >= 400) {
+      return { valid: false, reason: `HTTP ${status} error` }
+    }
+
+    // Blank body
+    if (!body || body.trim().length === 0) {
+      return { valid: false, reason: 'Empty response body' }
+    }
+
+    // Vite error overlay — the page has <script> tags but the app div is empty
+    // A truly blank React app will have <div id="root"></div> with nothing inside it
+    // but the JS hasn't executed. We check for the Vite error pre tag.
+    if (body.includes('vite-error-overlay') || body.includes('Internal Server Error')) {
+      return { valid: false, reason: 'Vite error overlay detected' }
+    }
+
+    // Very minimal body — less than 100 bytes of actual content suggests a bare-bones
+    // index.html with no compiled JS loaded (build broke before bundling)
+    const stripped = body.replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim()
+    if (stripped.length < 10 && !body.includes('<script')) {
+      return { valid: false, reason: 'No meaningful content (no scripts, minimal HTML)' }
+    }
+
+    log(`Content validation passed: HTTP ${status}, body ${body.length} bytes`)
+    return { valid: true, reason: 'ok' }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    return { valid: false, reason: `Content fetch failed: ${msg}` }
+  }
+}
+
 export async function waitForHealthy(
   jobId: string,
   url: string,

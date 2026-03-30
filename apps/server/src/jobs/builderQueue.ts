@@ -31,6 +31,7 @@ import {
 import { generateRepairPlan, analyzeError } from '../services/planner'
 import {
   startPreview,
+  validatePreviewContent,
   PKG_MANAGER,
   type PreviewLogEntry,
   type PreviewTelemetryCallbacks,
@@ -1581,6 +1582,72 @@ try {
             previewPort: previewInstance.port,
             previewPid: previewInstance.pid,
           })
+
+          // ── Pre-completion content validation ───────────────────────────
+          // Verify the preview is actually serving content, not a blank page.
+          // If blank/broken, auto-repair silently before the user ever sees it.
+          const contentCheck = await validatePreviewContent(
+            previewInstance.url,
+            (msg) => addLog('info', msg, 'complete'),
+          )
+          if (!contentCheck.valid) {
+            await addLog('info', `SELF-HEAL: preview content invalid (${contentCheck.reason}) — auto-repairing`, 'complete')
+
+            // Emit a chat message so the user sees what's happening
+            emitToUser(userId, 'chat:message', {
+              id: `self-heal-${jobId}-${Date.now()}`,
+              chatId: '',
+              role: 'assistant',
+              type: 'text',
+              content: `I noticed the preview didn't load correctly (${contentCheck.reason}). Diving back in to fix the dev server config...`,
+              createdAt: new Date().toISOString(),
+            })
+
+            // Attempt targeted repair: regenerate index.html + main entry + App.tsx
+            try {
+              const repairPlan = await generateRepairPlan({
+                complaint: `Preview loads but shows blank page: ${contentCheck.reason}. The Vite dev server started but the app is not rendering. Fix the index.html, main.tsx entry point, and App.tsx to ensure the app renders.`,
+                fileTree,
+                projectSummary: typeof plan.summary === 'string' ? plan.summary : '',
+              })
+              if (repairPlan.filesToRepair.length > 0) {
+                const selfHealCallbacks: CodeGenCallbacks = {
+                  onPhaseStart: async (_phase, fileCount) => {
+                    await addLog('info', `SELF-HEAL: repairing ${fileCount} file(s)`, 'complete')
+                  },
+                  onFileStart: async (filePath, description) => {
+                    await addLog('create', `SELF-HEAL: repairing ${filePath} — ${description}`, 'complete', {}, filePath)
+                  },
+                  onFileComplete: async (filePath, bytes, generatedBy) => {
+                    await addLog('success', `SELF-HEAL: repaired ${filePath} (${(bytes / 1024).toFixed(1)} KB) [${generatedBy}]`, 'complete', { bytes, generatedBy }, filePath, bytes, generatedBy)
+                  },
+                  onFileError: async (filePath, error) => {
+                    await addLog('error', `SELF-HEAL ERROR: ${filePath}: ${error}`, 'complete', { error }, filePath)
+                  },
+                }
+                await repairProjectFiles(workspacePath, codeGenProject, repairPlan.filesToRepair, selfHealCallbacks)
+                await addLog('success', `SELF-HEAL: repaired ${repairPlan.filesToRepair.length} files`, 'complete')
+              }
+            } catch (repairErr) {
+              await addLog('info', `SELF-HEAL: repair attempt failed (non-fatal): ${repairErr instanceof Error ? repairErr.message.slice(0, 200) : ''}`, 'complete')
+            }
+
+            // Re-validate after repair
+            const recheck = await validatePreviewContent(previewInstance.url)
+            if (!recheck.valid) {
+              await addLog('info', `SELF-HEAL: preview still broken after repair (${recheck.reason}) — completing anyway`, 'complete')
+            } else {
+              await addLog('success', 'SELF-HEAL: preview content now valid after repair', 'complete')
+              emitToUser(userId, 'chat:message', {
+                id: `self-heal-ok-${jobId}-${Date.now()}`,
+                chatId: '',
+                role: 'assistant',
+                type: 'text',
+                content: 'Fixed! The preview is now rendering correctly.',
+                createdAt: new Date().toISOString(),
+              })
+            }
+          }
 
           // Store the browser-accessible relative URL (not localhost) in the DB
           // so that /api/preview/:jobId/status and rehydration both return a usable URL.

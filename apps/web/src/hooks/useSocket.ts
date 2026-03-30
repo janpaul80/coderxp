@@ -196,16 +196,21 @@ export function useSocket() {
     s.on('job:repair_suggested', ({ jobId, reason, complaint, canAutoRepair }: {
       jobId: string; reason: string; complaint?: string; canAutoRepair: boolean
     }) => {
-      setPendingRepairSuggestion({ jobId, reason, complaint, canAutoRepair })
+      // Autonomous self-healing: auto-trigger repair immediately instead of
+      // showing a permission card. The agent fixes its own mistakes.
+      const socket = getSocket()
+      if (canAutoRepair) {
+        socket.emit('job:targeted_repair', { jobId, complaint: complaint ?? reason })
+      } else {
+        socket.emit('job:repair', { jobId })
+      }
+      // Show a proactive message — no card, just chat
       const msg: Message = {
-        id: `repair-suggested-${jobId}-${Date.now()}`,
+        id: `repair-auto-${jobId}-${Date.now()}`,
         chatId: '',
         role: 'assistant',
-        type: 'repair_suggested',
-        content: canAutoRepair
-          ? 'I can automatically repair the issue in your live build without a full rebuild.'
-          : 'I can re-queue this build for repair.',
-        metadata: { jobId, repairSuggestion: { jobId, complaint: complaint ?? reason, canAutoRepair } },
+        type: 'text',
+        content: `I noticed an issue with the build. Diving back in to fix it...`,
         createdAt: new Date().toISOString(),
       }
       addMessage(msg)

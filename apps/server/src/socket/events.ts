@@ -47,6 +47,79 @@ import {
   resolveActiveAgents,
 } from '../agents'
 
+// ─── Format plan as conversational markdown ────────────────────
+// Instead of sending a structured card, the agent talks through the plan
+// naturally — features as prose, tech as inline mentions, steps as numbered list.
+
+function formatPlanAsConversation(plan: {
+  summary?: string | null
+  features?: string[] | null
+  techStack?: { frontend?: string[]; backend?: string[]; database?: string[] } | null
+  integrations?: string[] | null
+  frontendScope?: string[] | null
+  backendScope?: string[] | null
+  executionSteps?: Array<{ title: string; description?: string }> | null
+}): string {
+  const lines: string[] = []
+
+  // Summary — the agent's voice
+  if (plan.summary) {
+    lines.push(plan.summary)
+    lines.push('')
+  }
+
+  // Features
+  const features = plan.features ?? []
+  if (features.length > 0) {
+    lines.push("Here's what I'll build for you:")
+    lines.push('')
+    for (const f of features) {
+      lines.push(`- ${f}`)
+    }
+    lines.push('')
+  }
+
+  // Tech stack — mentioned naturally
+  const allTech = [
+    ...(plan.techStack?.frontend ?? []),
+    ...(plan.techStack?.backend ?? []),
+    ...(plan.techStack?.database ?? []),
+  ]
+  const integrations = plan.integrations ?? []
+  if (allTech.length > 0 || integrations.length > 0) {
+    const parts = [...allTech, ...integrations]
+    lines.push(`**Tech stack:** ${parts.join(', ')}`)
+    lines.push('')
+  }
+
+  // Pages / endpoints
+  const pages = plan.frontendScope ?? []
+  const endpoints = plan.backendScope ?? []
+  if (pages.length > 0) {
+    lines.push(`**Pages:** ${pages.join(', ')}`)
+  }
+  if (endpoints.length > 0) {
+    lines.push(`**API endpoints:** ${endpoints.join(', ')}`)
+  }
+  if (pages.length > 0 || endpoints.length > 0) lines.push('')
+
+  // Execution steps
+  const steps = plan.executionSteps ?? []
+  if (steps.length > 0) {
+    lines.push('**How I\'ll build it:**')
+    lines.push('')
+    steps.forEach((step, i) => {
+      const desc = step.description ? ` — ${step.description}` : ''
+      lines.push(`${i + 1}. ${step.title}${desc}`)
+    })
+    lines.push('')
+  }
+
+  lines.push('Ready to build? Just approve and I\'ll get started.')
+
+  return lines.join('\n')
+}
+
 // ─── Active job statuses (used for one-active-build + concurrent limit guards) ──
 
 const ACTIVE_JOB_STATUSES = [
@@ -387,12 +460,13 @@ export function registerSocketEvents(io: Server) {
             })
 
             // Add assistant message
+            const planConversation = formatPlanAsConversation(refinedPlan)
             const message = await prisma.message.create({
               data: {
                 chatId: plan.chatId,
                 role: 'assistant',
-                type: 'plan',
-                content: `I've revised the plan based on your feedback: "${modifications}"`,
+                type: 'text' as MessageType,
+                content: `I've revised the plan based on your feedback.\n\n${planConversation}`,
                 metadata: { planId: refinedPlan.id },
               },
             })
@@ -896,12 +970,13 @@ async function handleWithAI(
           },
         })
         await savePlannerRun({ chatId, projectId, planId: plan.id, userRequest: content, metadata })
+        const planConvo = formatPlanAsConversation(plan)
         const message = await prisma.message.create({
           data: {
             chatId,
             role: 'assistant',
-            type: 'plan',
-            content: "Here's the implementation plan I've created for your project. Review it carefully and approve to start building.",
+            type: 'text' as MessageType,
+            content: planConvo,
             metadata: { planId: plan.id },
           },
         })
@@ -951,7 +1026,7 @@ async function handleWithAI(
   if (intent === 'build_request' || intent === 'modification') {
     try {
       // Emit planner agent status
-      emitPipelineStatus('planning', 'Analyzing request and generating plan...')
+      emitPipelineStatus('planning', 'Agent is thinking...')
       emitAgentStatus('planner', 'running', 'Planner: analyzing request...')
 
       const { plan: planOutput, metadata } = await generatePlan({
@@ -993,19 +1068,20 @@ async function handleWithAI(
         metadata,
       })
 
+      const planConvoContent = formatPlanAsConversation(plan)
       const message = await prisma.message.create({
         data: {
           chatId,
           role: 'assistant',
-          type: 'plan',
-          content: "Here's the implementation plan I've created for your project. Review it carefully and approve to start building.",
+          type: 'text' as MessageType,
+          content: planConvoContent,
           metadata: { planId: plan.id },
         },
       })
 
       // Emit plan:created so frontend transitions to awaiting_approval
       socket.emit('plan:created', plan)
-      // Include full plan in message metadata so PlanCard can render without a fetch
+      // Include full plan in message metadata so approval controls render inline
       socket.emit('chat:message', { ...message, metadata: { planId: plan.id, plan } })
 
       console.log(`[Socket] AI plan ${plan.id} created for chat ${chatId} (${metadata.durationMs}ms, model=${metadata.model})`)

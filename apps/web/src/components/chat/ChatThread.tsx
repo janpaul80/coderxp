@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { useChatStore } from '@/store/chatStore'
 import { useAppStore } from '@/store/appStore'
 import { ChatMessage } from './ChatMessage'
-import { PlanCard } from './PlanCard'
+import { ApprovalControls } from './ApprovalControls'
 import { TypingDots } from '@/components/ui/Spinner'
 import { Zap } from 'lucide-react'
 
@@ -116,13 +116,12 @@ export function ChatThread() {
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ duration: 0.2 }}
               >
-                {message.type === 'plan' && message.metadata?.plan ? (
-                  <PlanCard
-                    plan={message.metadata.plan}
-                    isActive={appMode === 'awaiting_approval'}
-                  />
-                ) : (
-                  <ChatMessage message={message} />
+                <ChatMessage message={message} />
+                {/* Inline approval controls for plan messages */}
+                {message.metadata?.plan && appMode === 'awaiting_approval' && (
+                  <div className="px-4 py-2 ml-9">
+                    <ApprovalControls plan={message.metadata.plan} />
+                  </div>
                 )}
               </motion.div>
             ))}
