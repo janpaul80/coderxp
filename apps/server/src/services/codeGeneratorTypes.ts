@@ -55,7 +55,7 @@ export interface GeneratedFile {
 
 export interface CodeGenCallbacks {
   onFileStart: (path: string, description: string) => Promise<void>
-  onFileComplete: (path: string, bytes: number, generatedBy: 'ai' | 'template') => Promise<void>
+  onFileComplete: (path: string, bytes: number, generatedBy: 'ai' | 'template', content: string) => Promise<void>
   onFileError: (path: string, error: string) => Promise<void>
   onPhaseStart: (phase: string, fileCount: number) => Promise<void>
   /** Called for each streaming token delta during AI file generation */

@@ -526,7 +526,7 @@ export async function generateProjectFiles(
       writeWorkspaceFile(workspaceId, spec.relativePath, content)
       const bytes = Buffer.byteLength(content, 'utf8')
       generated.push({ relativePath: spec.relativePath, content, generatedBy: 'template', bytes })
-      await callbacks.onFileComplete(spec.relativePath, bytes, 'template')
+      await callbacks.onFileComplete(spec.relativePath, bytes, 'template', content)
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       console.error(`[CodeGen] Template error for ${spec.relativePath}: ${msg}`)
@@ -573,7 +573,7 @@ export async function generateProjectFiles(
       // If fallback was already forced before generate(), this file used a template.
       const generatedBy = spec.isTemplate || wasFallbackBefore ? 'template' : 'ai'
       generated.push({ relativePath: spec.relativePath, content, generatedBy, bytes })
-      await callbacks.onFileComplete(spec.relativePath, bytes, generatedBy)
+      await callbacks.onFileComplete(spec.relativePath, bytes, generatedBy, content)
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       console.error(`[CodeGen]   ✗ ${spec.relativePath} FAILED: ${msg}`)
@@ -656,7 +656,7 @@ export async function repairProjectFiles(
       const bytes = Buffer.byteLength(content, 'utf8')
       const generatedBy = content.includes('// fallback') ? 'template' : 'ai'
       generated.push({ relativePath: spec.relativePath, content, generatedBy, bytes })
-      await callbacks.onFileComplete(spec.relativePath, bytes, generatedBy)
+      await callbacks.onFileComplete(spec.relativePath, bytes, generatedBy, content)
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       console.error(`[CodeGen] Repair error for ${spec.relativePath}: ${msg}`)

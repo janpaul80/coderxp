@@ -272,7 +272,7 @@ const worker = new Worker(
           void emitToUser(userId, 'job:file_token', { jobId, path, delta: '' })
         },
 
-        onFileComplete: async (path: string, bytes: number, generatedBy: 'ai' | 'template') => {
+        onFileComplete: async (path: string, bytes: number, generatedBy: 'ai' | 'template', content: string) => {
           filesGenerated++
           const progress = Math.min(85, 10 + Math.round((filesGenerated / Math.max(totalFileCount, 1)) * 75))
           await addLog('create', `CREATE ${path} (${(bytes / 1024).toFixed(1)} KB) [${generatedBy}]`, 'files_write', {
@@ -283,6 +283,7 @@ const worker = new Worker(
             `Writing ${path}...`,
             progress,
           )
+          void emitToUser(userId, 'job:file_token', { jobId, path, delta: content })
         },
 
         onFileError: async (path: string, error: string) => {
